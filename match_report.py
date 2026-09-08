@@ -322,6 +322,8 @@ def collect(keywords, cities, per_query, max_total, headless, refresh):
                                 j["description"] = d["description"]
                             j["hr_name"] = d.get("hr_name", "")
                             j["hr_title"] = d.get("hr_title", "")
+                            j["hr_active_label"] = d.get("hr_active_label", "")
+                            j["hr_active_days"] = d.get("hr_active_days", -1)
                         except Exception as e:
                             print(f"  详情失败: {e}")
                         pause(1.5, 3.0)
@@ -676,7 +678,7 @@ def _job_sample_lines(jobs, top=40):
         if _is_campus_job(j):
             head += "　**🎓应届/校招**"
         active = (j.get("hr_active_label") or "").strip() or "活跃度未知"
-        out.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''} · HR:{active}")
+        out.append(f"{i}. {head} · **{j.get('company') or ''}** · {j.get('salary') or ''} · HR:{active}")
         desc = (j.get("description") or "").strip()
         if desc:
             # 缩进宽度 = 序号位数 + 2 (如"1."→3格, "10."→4格), 保证嵌套进列表项

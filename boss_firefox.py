@@ -1033,12 +1033,16 @@ class BossScraper:
             except:
                 pass
 
+            # 先取 body 文本行(活跃度兜底和岗位描述都要用)——必须在二次解析之前定义
+            body = self.page.inner_text("body")
+            lines = [l.strip() for l in body.split("\n") if l.strip()]
+
             # 二次解析: 文本 -> 天数
             if result.get("hr_active_label"):
                 parsed = parse_hr_active(result["hr_active_label"])
                 result["hr_active_days"] = parsed["days"]
             else:
-                # 从 body 文本兜底找一遍
+                # 从 body 文本兜底找一遍(如"刚刚活跃"/"3日内活跃")
                 for l in lines:
                     if "活跃" in l and len(l) <= 12:
                         result["hr_active_label"] = l
@@ -1047,9 +1051,6 @@ class BossScraper:
                         break
 
             # ── 提取岗位描述 ──
-            body = self.page.inner_text("body")
-            lines = [l.strip() for l in body.split("\n") if l.strip()]
-
             skill_lines = []
             capture = False
             for l in lines:

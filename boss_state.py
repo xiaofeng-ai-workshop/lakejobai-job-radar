@@ -571,6 +571,7 @@ def update_application_from_job(app_id: int, job: dict) -> Optional[dict]:
         "education": job.get("education", ""),
         "hr_name": job.get("hr_name", ""),
         "hr_title": job.get("hr_title", ""),
+        "hr_active_label": job.get("hr_active_label", ""),
         "description": job.get("description", ""),
     }
     params = []
@@ -579,6 +580,14 @@ def update_application_from_job(app_id: int, job: dict) -> Optional[dict]:
         value = (value or "").strip()
         assignments.append(f"{column}=CASE WHEN ?!='' THEN ? ELSE {column} END")
         params.extend([value, value])
+    # hr_active_days 为整数: >-1 才覆盖(空/未知不覆盖旧值)
+    days = job.get("hr_active_days")
+    try:
+        days = int("" if days is None else days)
+    except (TypeError, ValueError):
+        days = -1
+    assignments.append("hr_active_days=CASE WHEN ?>-1 THEN ? ELSE hr_active_days END")
+    params.extend([days, days])
     params.append(app_id)
 
     db = get_db()
