@@ -281,12 +281,21 @@ def collect(keywords, cities, per_query, max_total, headless, refresh):
                 if _total_done():
                     break
                 print(f"\n[搜索] {kw} @ {city or '全国'} (目标 {per_query} 条)")
-                # 记录实际搜索URL(与 BOSS 页面原生格式一致: /jobs, city在前)
+                # 记录实际搜索URL(与 BOSS 页面原生格式一致: /jobs, city在前), 持久化到DB
                 from urllib.parse import quote_plus as _qp
-                search_urls.append({
+                su = {
                     "kw": kw, "city": city or "全国",
                     "url": f"https://www.zhipin.com/web/geek/jobs?city={city_code}&query={_qp(kw)}",
-                })
+                }
+                search_urls.append(su)
+                try:
+                    import json as _json
+                    history = _json.loads(get_setting("search_url_history") or "[]")
+                except Exception:
+                    history = []
+                if su not in history:
+                    history.append(su)
+                set_setting("search_url_history", _json.dumps(history, ensure_ascii=False))
                 try:
                     jobs = sc.search(kw, city_code)
                 except Exception as e:
@@ -889,7 +898,16 @@ def main():
     y, m, d = date.today().strftime("%Y-%m-%d").split("-")
     report_title = f"{y}年{m}月{d}日-{kw_part}（{city_part}）"
 
-    # 采集方法章节: 记录每次实际搜索的URL, BOSS召回的相关岗位可溯源
+    # 采集方法章节: 本次采集的实时URL优先; --report-only 时读DB持久化的历史搜索URL
+    if not search_urls:
+        try:
+            history = json.loads(get_setting("search_url_history") or "[]")
+        except Exception:
+            history = []
+        # 与本次报告相关的关键词/城市优先, 其他历史组合也列出(库是累计的)
+        rel = [h for h in history if any(k in h.get("kw", "") or h.get("kw", "") in k for k in kws_used)]
+        other = [h for h in history if h not in rel]
+        search_urls = rel + other
     method_lines = ["## 采集方法", ""]
     if search_urls:
         for su in search_urls:
@@ -898,10 +916,11 @@ def main():
         method_lines.append(
             "> 搜索词直接交给 BOSS 直聘搜索引擎做相关性召回（非标题精确匹配），"
             "结果会包含平台认为相关的岗位（如产品经理/售前/总经理类）；"
-            "报告已按黑名单过滤明显无关岗位，弱相关岗位保留在样本中、可在上方岗位样本列表复核。"
+            "报告已按相关性+黑名单双重过滤，被剔除岗位在各清单单列可复核。"
+            "链接需在已登录 BOSS 的浏览器中打开。"
         )
     else:
-        method_lines.append(f"- 本次为 --report-only 模式（未重新采集），报告基于库中已有数据，关键词：{'、'.join(kws_used)}")
+        method_lines.append(f"- 数据采集于早期版本（未记录搜索URL），本次报告关键词：{'、'.join(kws_used)}")
     method_lines.append("")
 
     if market:
