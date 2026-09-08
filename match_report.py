@@ -49,7 +49,7 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "interview"))
 
-from boss_firefox import BossScraper, OUTPUT_DIR, parse_skills, pause  # noqa: E402
+from boss_firefox import BossScraper, parse_skills, pause  # noqa: E402
 from boss_state import (  # noqa: E402
     get_setting,
     set_setting,
@@ -478,12 +478,20 @@ def main():
         pause(1, 2)
 
     market = args.market or not _has_resume()
+    # 报告文件名: xx年xx月xx日-xx岗位（xx城市）.md, 输出到项目 reports/ 目录
+    kws_used = [k.strip() for k in (args.keywords or "AI项目经理").split(",") if k.strip()]
+    cities_used = [c.strip() for c in (args.city or "武汉").split(",") if c.strip()] or ["武汉"]
+    kw_part = "+".join(kws_used)[:30]
+    city_part = "+".join(cities_used)[:20]
+    y, m, d = date.today().strftime("%Y-%m-%d").split("-")
+    report_title = f"{y}年{m}月{d}日-{kw_part}（{city_part}）"
+
     if market:
         if not args.market:
             print("[提示] 未检测到有效简历, 自动进入市场模式(仅统计JD热词); 导入简历后自动切换为匹配模式")
         jobs, freq, cats = analyze_market(args.limit)
         report, today = build_market_report(jobs, freq, cats)
-        out_name = f"市场热词报告_{today}.md"
+        report = report.replace(f"# 市场热词报告 · {today}", f"# 市场热词报告 · {report_title}", 1)
         summary = f"共{len(jobs)}个岗位" + (f", 热词TOP1: {freq[0][0]}({freq[0][1]}个岗位)" if freq else "")
     else:
         results, resume, mode = analyze_match(args.limit, args.keyword_only)
@@ -491,13 +499,21 @@ def main():
             print("没有可分析的结果")
             sys.exit(1)
         report, today = build_report(results, resume, mode)
-        out_name = f"匹配报告_{today}.md"
+        report = report.replace(f"# 简历-JD 匹配报告 · {today}", f"# 简历-JD 匹配报告 · {report_title}", 1)
         summary = f"共{len(results)}个岗位, Top1: {results[0][0]['job_title']}({results[0][1].get('match_score')}分)"
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = OUTPUT_DIR / out_name
-    out.write_text(report, encoding="utf-8")
-    print(f"\n[完成] 报告已生成: {out}")
+    # 输出到项目 reports/ 目录; 同名文件(同日同岗位同城市)则追加合并
+    out_dir = ROOT / "reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"{report_title}.md"
+    if out.exists():
+        with open(out, "a", encoding="utf-8") as f:
+            f.write(f"\n\n---\n\n<!-- 追加于 {date.today().strftime('%Y-%m-%d %H:%M')} -->\n\n")
+            f.write(report)
+        print(f"\n[完成] 报告已合并追加到: {out}")
+    else:
+        out.write_text(report, encoding="utf-8")
+        print(f"\n[完成] 报告已生成: {out}")
     print(f"        {summary}")
 
 
