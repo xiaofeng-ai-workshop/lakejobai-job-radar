@@ -563,6 +563,7 @@ def _job_sample_lines(jobs, top=40):
             out.append(desc)
             out.append("")
             out.append("</details>")
+            out.append("")  # 关键: </details>后必须空行, 否则下一行列表被吞进HTML块, 链接不渲染
     return out
 
 
