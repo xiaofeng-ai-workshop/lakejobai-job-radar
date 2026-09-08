@@ -787,9 +787,11 @@ def build_market_report(jobs, weak_jobs, noise_jobs, freq, cats):
         if groups:
             n_all = sum(len(sents) for _, sents in groups)
             parts = []
-            for c, sents in groups:
+            for gi, (c, sents) in enumerate(groups):
                 items = "".join(f"<br>{qi}. {sent}" for qi, sent in enumerate(sents, 1))
-                parts.append(f"<b>{c}</b>{items}")
+                # 公司标题前也换行(第一组除外, 其后与上一组隔开), 标题后接第一句前有<br>
+                lead = "<br>" if gi > 0 else ""
+                parts.append(f"{lead}<b>【{c}】</b>{items}")
             jd_cell = f"<details><summary>展开 {len(groups)} 家公司 / {n_all} 条</summary>" + "".join(parts) + "</details>"
         else:
             jd_cell = "—"
