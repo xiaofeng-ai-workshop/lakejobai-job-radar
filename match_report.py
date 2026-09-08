@@ -49,7 +49,7 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "interview"))
 
-from boss_firefox import BossScraper, parse_skills, pause  # noqa: E402
+from boss_firefox import BossScraper, pause  # noqa: E402
 from boss_state import (  # noqa: E402
     get_setting,
     set_setting,
@@ -60,6 +60,147 @@ from boss_state import (  # noqa: E402
 )
 
 CACHE_FILE = ROOT / ".boss_profile" / "match_cache.json"
+
+
+# ── 技能词典 v2：全品类 + 词边界匹配 ──────────────────
+# 设计: 一套综合词典覆盖所有岗位族(管理/产品/技术/商务), 词频只计入JD中真实出现的词,
+# 所以采集什么岗位, 报告自然突出什么类别的词; 分类视图可以看出岗位偏管理还是偏技术。
+
+SKILL_MAP_V2 = {
+    "项目管理": {
+        "项目管理", "PMP", "PgMP", "PRINCE2", "敏捷", "Scrum", "看板", "Kanban",
+        "需求分析", "需求管理", "需求调研", "跨部门协作", "跨部门沟通", "跨团队协作",
+        "风险管控", "风险管理", "交付管理", "项目交付", "项目落地", "项目推进",
+        "干系人", "OKR", "KPI", "甘特图", "里程碑", "立项", "结项", "排期",
+        "资源协调", "进度管理", "变更管理", "项目集", "项目群", "WBS", "复盘",
+    },
+    "产品管理": {
+        "产品规划", "产品设计", "产品迭代", "产品生命周期", "用户研究", "用户体验",
+        "用户调研", "原型设计", "PRD", "MRD", "竞品分析", "竞品调研", "用户增长",
+        "用户画像", "MVP", "埋点", "A/B测试", "产品思维", "商业化", "变现",
+    },
+    "协作/办公工具": {
+        "Jira", "Confluence", "飞书", "钉钉", "企业微信", "Teambition", "TAPD",
+        "禅道", "Notion", "Axure", "Figma", "Visio", "Xmind", "Excel", "PPT",
+        "Office", "墨刀", "ProcessOn", "n8n", "Zapier",
+    },
+    "AI/大模型": {
+        "大模型", "LLM", "Agent", "智能体", "RAG", "微调", "SFT", "Prompt",
+        "提示词", "Function Calling", "Tool Calling", "Embedding", "AIGC",
+        "知识库", "智能客服", "数字人", "Copilot", "多模态", "LangChain",
+        "LangGraph", "Dify", "Coze", "MCP", "机器学习", "深度学习", "NLP",
+        "计算机视觉", "语音识别", "OCR", "ChatGPT", "DeepSeek",
+    },
+    "技术-开发": {
+        "Python", "Java", "Go", "Golang", "C++", "C#", "C语言", "PHP",
+        "TypeScript", "JavaScript", "Node.js", "React", "Vue", "FastAPI",
+        "Flask", "Django", "Spring", "微服务", "API", "爬虫", "自动化脚本", "SQL",
+    },
+    "技术-数据": {
+        "MySQL", "PostgreSQL", "Redis", "MongoDB", "Elasticsearch", "Kafka",
+        "数据分析", "数据治理", "数据可视化", "BI", "数仓", "数据仓库", "大数据",
+        "Hadoop", "Spark", "Flink", "Hive",
+    },
+    "技术-部署/架构": {
+        "Docker", "Kubernetes", "K8s", "Linux", "CI/CD", "Nginx", "GPU", "CUDA",
+        "架构设计", "系统设计", "高并发", "分布式",
+    },
+    "商务/行业": {
+        "售前", "解决方案", "方案编写", "商务谈判", "客户沟通", "客户成功", "大客户",
+        "B端", "G端", "C端", "政务", "国企", "央企", "医疗", "金融", "教育",
+        "制造", "工业", "能源", "汽车", "车载", "电商", "供应链", "SaaS",
+    },
+    "软技能/领导力": {
+        "团队管理", "人员管理", "目标管理", "沟通协调", "汇报", "演讲", "谈判",
+        "领导力", "执行力", "出差", "驻场", "文档编写", "逻辑思维", "抗压",
+    },
+}
+
+# 词边界匹配缓存(修复旧版 substring 匹配把 "c" 从任意英文单词里抠出来的 bug)
+_TERM_RE = {}
+
+
+def _term_hit(term: str, text: str) -> bool:
+    """ASCII 技能词用词边界匹配(防止单字母/短词误命中), 中文词用子串匹配。"""
+    if re.fullmatch(r"[A-Za-z0-9+#./ -]+", term):
+        if term not in _TERM_RE:
+            _TERM_RE[term] = re.compile(
+                r"(?<![A-Za-z0-9+#])" + re.escape(term) + r"(?![A-Za-z0-9+#])", re.I
+            )
+        return bool(_TERM_RE[term].search(text))
+    return term.lower() in text.lower()
+
+
+def parse_skills2(text: str) -> dict:
+    r = {}
+    for cat, skills in SKILL_MAP_V2.items():
+        hits = [s for s in skills if _term_hit(s, text)]
+        if hits:
+            r[cat] = hits
+    return r
+
+
+# ── 噪音过滤与结构化解析 ──────────────────────────────
+
+# 默认标题黑名单: 明显与求职方向无关的岗位(可通过 settings.noise_filter_keywords 追加)
+DEFAULT_NOISE_WORDS = (
+    "销售", "投资", "合伙人", "猎头", "讲师", "加盟", "招商", "渠道",
+    "保险", "房产", "中介", "客服", "催收", "地推",
+)
+
+
+def _load_noise_words() -> list:
+    custom = (get_setting("noise_filter_keywords") or "").strip()
+    extra = [w.strip() for w in custom.split(",") if w.strip()]
+    return list(DEFAULT_NOISE_WORDS) + extra
+
+
+def _is_noise(title: str, noise_words) -> bool:
+    return any(w in (title or "") for w in noise_words)
+
+
+def _parse_salary_k(s: str):
+    """'23-29K·24薪' -> (23, 29); '361-461元/天'等日薪/异常格式 -> None"""
+    m = re.search(r"(\d+)-(\d+)K", s or "")
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if 1 <= lo <= 200 and lo < hi <= 300:
+            return lo, hi
+    return None
+
+
+def _salary_stats(jobs):
+    """薪资统计: 可解析岗位数/中位数/分档分布"""
+    pairs = [(j, _parse_salary_k(j.get("salary") or "")) for j in jobs]
+    ok = [(j, p) for j, p in pairs if p]
+    if not ok:
+        return None
+    los = sorted(p[0] for _, p in ok)
+    his = sorted(p[1] for _, p in ok)
+    med = lambda a: a[len(a) // 2] if len(a) % 2 else (a[len(a) // 2 - 1] + a[len(a) // 2]) / 2
+    brackets = [("≤15K", 0, 15), ("15-25K", 15, 25), ("25-35K", 25, 35), (">35K", 35, 999)]
+    dist = {name: 0 for name, _, _ in brackets}
+    for _, (lo, hi) in ok:
+        mid = (lo + hi) / 2
+        for name, a, b in brackets:
+            if a <= mid < b or (name == ">35K" and mid >= 35):
+                dist[name] += 1
+                break
+    return {
+        "n": len(ok), "n_total": len(jobs),
+        "lo_med": med(los), "hi_med": med(his),
+        "dist": dist,
+    }
+
+
+def _dist_table(jobs, col, order=None):
+    """经验/学历等字段的分布统计"""
+    c = Counter((j.get(col) or "").strip() for j in jobs if (j.get(col) or "").strip())
+    if order:
+        items = [(k, c[k]) for k in order if k in c] + [(k, n) for k, n in c.most_common() if k not in order]
+    else:
+        items = c.most_common()
+    return items
 
 
 # ── 工具 ──────────────────────────────────────────────
@@ -242,12 +383,12 @@ def _keyword_score(job, resume):
     """无API Key时的降级打分: JD技能词 vs 简历文本覆盖率的粗估。"""
     text = (job.get("description") or "") + " " + (job.get("job_title") or "")
     skills = []
-    for _, ss in parse_skills(text).items():
+    for _, ss in parse_skills2(text).items():
         skills.extend(ss)
     if not skills:
         return None
     r = (resume or "").lower()
-    have = [s for s in skills if s.lower() in r]
+    have = [s for s in skills if _term_hit(s, r) or s.lower() in r]
     score = int(round(40 + 60.0 * len(set(have)) / len(set(skills))))
     return {
         "match_score": score,
@@ -275,25 +416,30 @@ def _fetch_jobs_with_jd(limit):
     return [dict(r) for r in rows]
 
 
-def analyze_market(limit):
-    """市场模式：不比对简历，统计 JD 中的技能词频（市场需求热词）。"""
-    jobs = _fetch_jobs_with_jd(limit)
-    if not jobs:
+def analyze_market(limit, kws=None):
+    """市场模式：不比对简历。噪音过滤 + JD技能词频 + 薪资/经验/学历统计。"""
+    jobs_all = _fetch_jobs_with_jd(limit)
+    if not jobs_all:
         print("库中没有含JD全文的岗位, 请先采集(--keywords ...)")
         sys.exit(1)
+    noise_words = _load_noise_words()
+    jobs, noise_jobs = [], []
+    for j in jobs_all:
+        (noise_jobs if _is_noise(j.get("job_title") or "", noise_words) else jobs).append(j)
+
     freq = Counter()
     cats = {}  # 技能小写 -> 类别
     for job in jobs:
         text = (job.get("description") or "") + " " + (job.get("job_title") or "")
         found = set()
-        for cat, ss in parse_skills(text).items():
+        for cat, ss in parse_skills2(text).items():
             for s in ss:
                 found.add(s.lower())
                 cats.setdefault(s.lower(), cat)
         for s in found:
             freq[s] += 1
-    print(f"[市场分析] {len(jobs)} 个岗位, 提取到 {len(freq)} 个技能词")
-    return jobs, freq.most_common(), cats
+    print(f"[市场分析] 有效{len(jobs)}个岗位(过滤噪音{len(noise_jobs)}个), 提取到 {len(freq)} 个技能词")
+    return jobs, noise_jobs, freq.most_common(), cats
 
 
 def analyze_match(limit, keyword_only):
@@ -340,15 +486,85 @@ def keyword_gap(results, resume):
     for job, _ in results:
         text = (job.get("description") or "") + " " + (job.get("job_title") or "")
         found = set()
-        for _, ss in parse_skills(text).items():
+        for _, ss in parse_skills2(text).items():
             for s in ss:
                 found.add(s.lower())
         for s in found:
-            (have if s in r else miss)[s] += 1
+            (have if (_term_hit(s, r) or s in r) else miss)[s] += 1
     return have, miss
 
 
 # ── 报告 ──────────────────────────────────────────────
+
+def _market_sections(jobs):
+    """薪资/经验/学历市场统计(市场报告与匹配报告共用)。返回 md 行列表, 三级标题。"""
+    out = []
+    s = _salary_stats(jobs)
+    if s:
+        out.append("### 薪资分析")
+        out.append("")
+        out.append(
+            f"可解析薪资的岗位 **{s['n']}/{s['n_total']}** · 区间中位数: "
+            f"**下限 {s['lo_med']:g}K / 上限 {s['hi_med']:g}K**"
+        )
+        out.append("")
+        out.append("| 薪资档(取区间中点) | 岗位数 | 占比 |")
+        out.append("|---|---|---|")
+        for name, n in s["dist"].items():
+            out.append(f"| {name} | {n} | {n * 100 // max(s['n'], 1)}% |")
+        out.append("")
+    exp = _dist_table(jobs, "experience", order=["经验不限", "应届", "1年内", "1-3年", "3-5年", "5-10年", "10年以上"])
+    edu = _dist_table(jobs, "education", order=["学历不限", "大专", "本科", "硕士", "博士"])
+    if exp or edu:
+        out.append("### 经验 / 学历要求分布")
+        out.append("")
+        if exp:
+            ne = sum(n for _, n in exp)
+            out.append(f"经验要求（{ne}/{len(jobs)} 个岗位标注了该项）：")
+            out.append("")
+            out.append("| 经验要求 | 岗位数 | 占比 |")
+            out.append("|---|---|---|")
+            for k, n in exp:
+                out.append(f"| {k} | {n} | {n * 100 // ne}% |")
+            out.append("")
+        if edu:
+            nd = sum(n for _, n in edu)
+            out.append(f"学历要求（{nd}/{len(jobs)} 个岗位标注了该项）：")
+            out.append("")
+            out.append("| 学历要求 | 岗位数 | 占比 |")
+            out.append("|---|---|---|")
+            for k, n in edu:
+                out.append(f"| {k} | {n} | {n * 100 // nd}% |")
+            out.append("")
+    return out
+
+
+def _hr_sort_key(j):
+    d = j.get("hr_active_days")
+    if d is None or d == "" or d == -1:
+        return (999, 0)
+    return (int(d), 0)
+
+
+def _job_sample_lines(jobs, top=40):
+    """岗位样本行: HR活跃度排序 + JD全文折叠块"""
+    out = []
+    for i, j in enumerate(sorted(jobs, key=_hr_sort_key)[:top], 1):
+        title = j["job_title"]
+        url = (j.get("job_url") or "").strip()
+        head = f"[{title}]({url})" if url else title
+        active = (j.get("hr_active_label") or "").strip() or "活跃度未知"
+        out.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''} · HR:{active}")
+        desc = (j.get("description") or "").strip()
+        if desc:
+            out.append("")
+            out.append(f"<details><summary>展开JD全文（{len(desc)}字）</summary>")
+            out.append("")
+            out.append(desc)
+            out.append("")
+            out.append("</details>")
+    return out
+
 
 def build_report(results, resume, mode):
     today = date.today().isoformat()
@@ -369,7 +585,24 @@ def build_report(results, resume, mode):
             f"| {job.get('salary') or ''} | {gap} |"
         )
     lines.append("")
-    lines.append("## 二、岗位详情")
+    # 市场背景: 薪资/经验/学历分布 + 高匹配岗位薪资对比
+    jobs_only = [j for j, _ in results]
+    ms = _market_sections(jobs_only)
+    if ms:
+        lines.append("## 二、市场背景（薪资 / 经验 / 学历）")
+        lines.append("")
+        lines.extend(ms)
+        strong = [j for j, r in results if int(r.get("match_score") or 0) >= 70]
+        s_all = _salary_stats(jobs_only)
+        s_strong = _salary_stats(strong) if strong else None
+        if s_all and s_strong:
+            lines.append(
+                f"> 💡 与你匹配度≥70分的 {len(strong)} 个岗位薪资中位数为 "
+                f"**{s_strong['lo_med']:g}-{s_strong['hi_med']:g}K**, 全部样本为 "
+                f"**{s_all['lo_med']:g}-{s_all['hi_med']:g}K** —— 前者可视为\"你目前够得着的薪资带\"。"
+            )
+            lines.append("")
+    lines.append("## 三、岗位详情")
     lines.append("")
     for i, (job, r) in enumerate(results, 1):
         lines.append(f"### {i}. {job['job_title']} · {job.get('company') or ''} ({r.get('match_score','-')}分)")
@@ -385,7 +618,7 @@ def build_report(results, resume, mode):
         lines.append("")
 
     have, miss = keyword_gap(results, resume)
-    lines.append("## 三、关键词缺口分析(全部JD统计)")
+    lines.append("## 四、关键词缺口分析(全部JD统计)")
     lines.append("")
     if have:
         lines.append("**简历已覆盖**(招聘方要求且你已具备):")
@@ -405,41 +638,59 @@ def build_report(results, resume, mode):
     return "\n".join(lines), today
 
 
-def build_market_report(jobs, freq, cats):
-    """市场模式报告：JD 热词统计，不涉及简历。"""
+def build_market_report(jobs, noise_jobs, freq, cats):
+    """市场模式报告：市场画像（薪资/经验/学历 + 热词 + 分类 + 样本 + 过滤名单），不涉及简历。"""
     today = date.today().isoformat()
     total = len(jobs)
     lines = [f"# 市场热词报告 · {today}", ""]
-    lines.append(f"> 样本: **{total} 个岗位**(JD全文) · 提取技能词 **{len(freq)}** 个 · 市场模式(未导入简历, 仅统计市场需求)")
+    lines.append(
+        f"> 有效样本: **{total} 个岗位**(JD全文) · 过滤噪音 **{len(noise_jobs)}** 个 · "
+        f"提取技能词 **{len(freq)}** 个 · 市场模式(未导入简历, 仅统计市场需求)"
+    )
     lines.append("")
-    lines.append("## 一、热门技能词 TOP 30")
+    lines.append("## 一、市场画像（薪资 / 经验 / 学历）")
+    lines.append("")
+    ms = _market_sections(jobs)
+    if ms:
+        lines.extend(ms)
+    else:
+        lines.append("*样本数据不足以统计薪资/经验/学历分布*")
+        lines.append("")
+
+    lines.append("## 二、热门技能词 TOP 30")
     lines.append("")
     lines.append("| # | 技能 | 出现岗位数 | 占比 | 类别 |")
     lines.append("|---|------|-----------|------|------|")
     for i, (s, n) in enumerate(freq[:30], 1):
-        lines.append(f"| {i} | {s} | {n} | {n * 100 // total}% | {cats.get(s, '')} |")
+        lines.append(f"| {i} | {s} | {n} | {n * 100 // max(total, 1)}% | {cats.get(s, '')} |")
     lines.append("")
 
     by_cat = {}
     for s, n in freq:
-        if n * 100 // total >= 20:  # 只列出现于≥20%岗位的
+        if n * 100 // max(total, 1) >= 20:  # 只列出现于≥20%岗位的
             by_cat.setdefault(cats.get(s, "其他"), []).append((s, n))
     if by_cat:
-        lines.append("## 二、分类视图(出现于≥20%岗位的技能)")
+        lines.append("## 三、分类视图(出现于≥20%岗位的技能)")
         lines.append("")
         for cat in sorted(by_cat, key=lambda c: -max(n for _, n in by_cat[c])):
             items = "、".join(f"**{s}**({n})" for s, n in sorted(by_cat[cat], key=lambda x: -x[1]))
             lines.append(f"- **{cat}**: {items}")
         lines.append("")
 
-    lines.append("## 三、岗位样本")
+    lines.append("## 四、岗位样本(按HR活跃度排序, 可展开JD全文)")
     lines.append("")
-    for i, j in enumerate(jobs[:40], 1):
-        title = j["job_title"]
-        url = (j.get("job_url") or "").strip()
-        head = f"[{title}]({url})" if url else title
-        lines.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''}")
+    lines.extend(_job_sample_lines(jobs))
     lines.append("")
+
+    if noise_jobs:
+        lines.append("## 五、已过滤的疑似无关岗位(标题命中黑名单, 未参与统计)")
+        lines.append("")
+        for j in noise_jobs[:20]:
+            lines.append(f"- {j.get('job_title') or ''} · {j.get('company') or ''} · {j.get('salary') or ''}")
+        lines.append("")
+        lines.append("> 黑名单默认: 销售/投资/合伙人/猎头/讲师/加盟/招商/渠道/保险/房产等; 可在 Web 设置页 `noise_filter_keywords` 追加自定义词(逗号分隔)。")
+        lines.append("")
+
     lines.append("---")
     lines.append(f"*生成于 {today} · 市场模式 · 后续用 --resume-file 导入简历后再次运行, 即自动切换为逐岗匹配排序*")
     return "\n".join(lines), today
@@ -492,10 +743,13 @@ def main():
     if market:
         if not args.market:
             print("[提示] 未检测到有效简历, 自动进入市场模式(仅统计JD热词); 导入简历后自动切换为匹配模式")
-        jobs, freq, cats = analyze_market(args.limit)
-        report, today = build_market_report(jobs, freq, cats)
+        jobs, noise_jobs, freq, cats = analyze_market(args.limit, kws_used)
+        report, today = build_market_report(jobs, noise_jobs, freq, cats)
         report = report.replace(f"# 市场热词报告 · {today}", f"# 市场热词报告 · {report_title}", 1)
-        summary = f"共{len(jobs)}个岗位" + (f", 热词TOP1: {freq[0][0]}({freq[0][1]}个岗位)" if freq else "")
+        summary = (
+            f"有效{len(jobs)}个岗位(过滤噪音{len(noise_jobs)}个)"
+            + (f", 热词TOP1: {freq[0][0]}({freq[0][1]}个岗位)" if freq else "")
+        )
     else:
         results, resume, mode = analyze_match(args.limit, args.keyword_only)
         if not results:
