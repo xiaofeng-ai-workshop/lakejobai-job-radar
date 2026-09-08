@@ -435,7 +435,10 @@ def build_market_report(jobs, freq, cats):
     lines.append("## 三、岗位样本")
     lines.append("")
     for i, j in enumerate(jobs[:40], 1):
-        lines.append(f"{i}. {j['job_title']} · {j.get('company') or ''} · {j.get('salary') or ''}")
+        title = j["job_title"]
+        url = (j.get("job_url") or "").strip()
+        head = f"[{title}]({url})" if url else title
+        lines.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''}")
     lines.append("")
     lines.append("---")
     lines.append(f"*生成于 {today} · 市场模式 · 后续用 --resume-file 导入简历后再次运行, 即自动切换为逐岗匹配排序*")
