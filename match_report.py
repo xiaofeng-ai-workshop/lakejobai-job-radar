@@ -281,11 +281,11 @@ def collect(keywords, cities, per_query, max_total, headless, refresh):
                 if _total_done():
                     break
                 print(f"\n[搜索] {kw} @ {city or '全国'} (目标 {per_query} 条)")
-                # 记录实际搜索URL(与 sc.search 内部拼接逻辑一致)
+                # 记录实际搜索URL(与 BOSS 页面原生格式一致: /jobs, city在前)
                 from urllib.parse import quote_plus as _qp
                 search_urls.append({
                     "kw": kw, "city": city or "全国",
-                    "url": f"https://www.zhipin.com/web/geek/job?query={_qp(kw)}&city={city_code}",
+                    "url": f"https://www.zhipin.com/web/geek/jobs?city={city_code}&query={_qp(kw)}",
                 })
                 try:
                     jobs = sc.search(kw, city_code)
