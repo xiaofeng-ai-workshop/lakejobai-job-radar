@@ -191,6 +191,9 @@ lakejob doctor                          # 环境诊断
 **Q3：脚本启动报「未检测到登录态」？**
 先跑 `python boss_firefox.py --login` 扫码。登录态失效（几天~几周不等）后重跑即可。
 
+**Q3.5：报 `Failed to launch the browser process` / Firefox 进程秒退？**
+浏览器 profile 被占用了——**Web 控制台和 match_report.py 不能同时用浏览器**。先关掉一边：到 Web 控制台「设置」页点「停止浏览器」（或直接关掉 boss_app），再跑脚本。反过来，脚本在跑时也别启动控制台的浏览器。
+
 **Q4：浏览器打开了但采集结果是空的？**
 通常是关键词太窄或城市没岗位，换关键词试试；也可能是被风控页拦截，肉眼看一下弹出的浏览器窗口在什么页面。
 
