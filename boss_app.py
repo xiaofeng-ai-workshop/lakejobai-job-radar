@@ -77,7 +77,8 @@ app = FastAPI(title="BOSS直聘自动化控制台", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # 仅允许本机来源，防止任意网页跨域读取本地控制台（含 API Key 等敏感设置）
+    allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -2278,6 +2279,8 @@ def read_settings():
     # 检查AI Key是否已配置
     ai_key = settings.get("ai_api_key", "")
     settings["ai_key_configured"] = "true" if ai_key and len(ai_key) > 10 else "false"
+    # 不回显明文 Key，前端仅依赖 ai_key_configured 标志
+    settings["ai_api_key"] = ""
     return {"settings": settings}
 
 

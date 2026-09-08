@@ -108,6 +108,44 @@ $ lakejob status                       # 看浏览器+今日统计
 
 ---
 
+## 📊 简历-JD 匹配报告（match_report.py）
+
+批量采集目标岗位 JD 全文 → 与你的简历摘要逐岗比对 → 按匹配度排序输出报告 + 关键词缺口建议。
+
+```bash
+# 0. 首次使用先安装 Firefox 内核（Playwright 专用版，非日常浏览器，装一次即可）
+python -m playwright install firefox
+
+# 1. 扫码登录（只需一次）
+python boss_firefox.py --login
+
+# 2. 导入简历文本（取前 3000 字，存入设置项 resume_summary；也可在 Web 设置页手填）
+python match_report.py --resume-file 我的简历.txt
+
+# 3. 采集 + 分析 + 出报告
+python match_report.py --keywords "AI Agent,Python开发" --city 广州 --max-jobs 20
+
+# 只分析库中已有 JD（跳过采集）
+python match_report.py --report-only
+
+# 零成本模式：不调 AI，纯关键词覆盖率分析
+python match_report.py --report-only --keyword-only
+```
+
+报告输出到 `~/AI/岗位日报/匹配报告_日期.md`，包含三部分：
+
+1. **匹配度排名表**（分数 / 结论 / 岗位 / 公司 / 薪资 / 主要差距）
+2. **每岗位详情**（关键技能、差距、投递建议、岗位链接）
+3. **关键词缺口分析** — JD 高频出现但简历未提及的技能，按出现频次排序（🔴≥10 / 🟡≥5 / 🟢），可作为简历补充关键词的依据
+
+说明：
+
+- 配置 AI Key 后逐岗 LLM 智能打分，结果缓存于 `.boss_profile/match_cache.json`（简历变更后自动失效，不重复计费）；未配置则自动降级为关键词覆盖分析
+- 打分时简历摘要会发送至所配置的 AI 服务商，介意可使用 `--keyword-only` 模式（完全不调 AI）
+- 常用参数：`--city`（城市名，默认全国）、`--max-jobs`（采集上限，默认 20）、`--limit`（分析最近 N 条，默认 50）、`--refresh`（强制重新采集已有岗位）
+
+---
+
 ## 💻 Web 控制台
 
 > 深色科技感（Vercel / Raycast 风格）单文件 SPA，无构建步骤、无外部 CDN。
@@ -215,6 +253,7 @@ $ lakejob scan-apply --max-pages 5
 | 👤 HR 真实姓名/头衔/活跃度 | ✅ | — |
 | 🏛 法人识别 + 法人直聘标签 | ✅ | — |
 | 🧠 AI JD 分析（匹配度+技能+差距+决策+风险） | ✅ | ✅ |
+| 📊 简历-JD 批量匹配报告（采集+排序+关键词缺口） | — | ✅ |
 | 📋 AI 简历优化（24h 缓存 + 项目改写） | ✅ | — |
 | 💬 AI 沟通建议（24h 缓存 + 话题方向） | ✅ | — |
 | 🤖 AI 自动回复（多平台模型） | ✅ | — |
@@ -309,6 +348,7 @@ $ lakejob scan-apply --max-pages 5
 ├── boss_geo.py              # 城市/区/规模 BOSS 编码映射
 ├── boss_replier.py          # AI 回复 + 招呼语 + 简历优化上下文
 ├── boss_state.py            # SQLite 数据持久化
+├── match_report.py          # 简历-JD 匹配报告（采集+分析+关键词缺口）
 ├── pyproject.toml           # 打包 + CLI 入口
 ├── lakejob_cli/             # CLI (18 命令)
 │   ├── cli.py / client.py / output.py / schema.json
@@ -469,7 +509,8 @@ lakejob status             # 浏览器运行状态
 ## 🔒 隐私与数据
 
 - 所有数据存储在本地 `.boss_profile/boss_state.db`，**不上传任何服务器**
-- `.boss_profile/` 已在 `.gitignore` 中，请勿提交
+- `.boss_profile/` 已在 `.gitignore` 中，请勿提交（内含登录态 Cookie，等同于账号凭证）
+- API 不回显明文 AI Key（仅返回已配置标志）；CORS 仅允许本机来源
 - AI Key 仅存储在本地 `settings` 表，**请勿在 issue / 截图里贴出**
 
 ---

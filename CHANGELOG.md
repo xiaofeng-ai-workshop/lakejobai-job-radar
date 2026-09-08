@@ -1,5 +1,26 @@
 # 更新日志
 
+## v4.2 — 安全加固 + 简历-JD 匹配报告 (2026-09-08)
+
+### 🔒 安全加固（boss_app.py）
+
+- CORS：`allow_origins=["*"]` 收紧为仅允许 `127.0.0.1` / `localhost`（任意端口）本机来源，防止浏览器中打开的任意网页跨域读取本地控制台（含设置数据、触发投递）
+- `GET /api/settings` 不再回显明文 `ai_api_key`（置空返回，前端仅依赖 `ai_key_configured` 标志，保存逻辑不受影响）
+
+### ✨ 新增 match_report.py — 简历-JD 匹配报告
+
+独立 CLI 脚本：批量采集目标岗位 JD 全文入库 → 与 `resume_summary` 逐岗比对 → 匹配度排序 + 关键词缺口报告，输出 `~/AI/岗位日报/匹配报告_日期.md`。
+
+- 复用 `BossScraper` 的搜索 + `fetch_detail` 详情采集（Web 控制台扫描仅存岗位卡片不含 JD 全文，此脚本补齐该环节）
+- LLM 逐岗打分，结果缓存于 `.boss_profile/match_cache.json`，简历变更后缓存自动失效；未配置 AI Key 时自动降级为关键词覆盖率分析（`--keyword-only` 可强制零成本模式）
+- 城市解析走 `boss_geo.resolve_city_code`（修复内置 `CITIES` 表仅覆盖山东城市的问题）
+- 支持 `--resume-file` 从文本文件导入简历（截取前 3000 字存入 `resume_summary`）
+- 报告含三部分：匹配度排名表 / 每岗位详情（技能、差距、建议、链接）/ 关键词缺口分析（JD 高频但简历未提及的技能按频次排序）
+
+用法详见 README「📊 简历-JD 匹配报告」一节。
+
+---
+
 ## v4.1 — 合并 PR #3 + AI 智能体后端补完 (2026-06-22)
 
 合并上游 PR #3 (v4.0 from xun-x33) 后，补回 main 端历史 commit 527a6bc 引入的 3 个 AI 端点。
