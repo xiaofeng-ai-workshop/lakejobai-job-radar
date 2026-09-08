@@ -49,7 +49,7 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "interview"))
 
-from boss_firefox import BossScraper, STATE_FILE, OUTPUT_DIR, parse_skills, pause  # noqa: E402
+from boss_firefox import BossScraper, OUTPUT_DIR, parse_skills, pause  # noqa: E402
 from boss_state import (  # noqa: E402
     get_setting,
     set_setting,
@@ -102,61 +102,81 @@ def _resolve_city_code(name: str) -> str:
 
 # ── 采集 ──────────────────────────────────────────────
 
-def collect(keywords, cities, max_jobs, headless, refresh):
-    """搜索 + 详情采集, 结果入库。返回本次新增/刷新条数。"""
-    if not STATE_FILE.exists():
-        print("未检测到登录态, 请先运行: python boss_firefox.py --login")
-        sys.exit(1)
-
+def collect(keywords, cities, per_query, max_total, headless, refresh):
+    """搜索 + 详情采集, 结果入库。每个 城市×关键词 组合各采 per_query 条。"""
     sc = BossScraper(headless=headless)
     sc.start()
+
+    # 登录态校验：Cookie 在持久化 profile 中(Web控制台扫码 / --login 均可),
+    # 不依赖 STATE_FILE; 实际打开页面验证
+    try:
+        sc.page.goto("https://www.zhipin.com/web/geek/job", wait_until="domcontentloaded", timeout=30000)
+        pause(2, 3)
+        if sc._login_prompt_visible():
+            print("登录态无效或已过期。请先扫码登录:")
+            print("  方式一: Web控制台 设置页 → 启动浏览器 → 扫码")
+            print("  方式二: python boss_firefox.py --login")
+            sys.exit(1)
+        print("[OK] 登录态有效")
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"登录检查失败: {e}")
+        sys.exit(1)
+
+    def _total_done():
+        return bool(max_total) and n_saved >= max_total
+
     n_saved = 0
     try:
         seen = set()
         for city in cities:
-            if n_saved >= max_jobs:
+            if _total_done():
                 break
             city_code = _resolve_city_code(city)
             for kw in keywords:
-                if n_saved >= max_jobs:
+                if _total_done():
                     break
-                print(f"\n[搜索] {kw} @ {city or '全国'}")
+                print(f"\n[搜索] {kw} @ {city or '全国'} (目标 {per_query} 条)")
                 try:
                     jobs = sc.search(kw, city_code)
                 except Exception as e:
                     print(f"  搜索失败: {e}")
                     continue
-            for j in jobs:
-                if n_saved >= max_jobs:
-                    break
-                url = _norm_url(j.get("url", ""))
-                key = j.get("title", "") + j.get("salary", "") + j.get("company", "")
-                if not url and key in seen:
-                    continue
-                seen.add(key)
-                # 已入库且已有JD全文 → 跳过详情采集(省时间)
-                existing = get_application_by_url(url) if url else None
-                if existing and (existing.get("description") or "").strip() and not refresh:
-                    continue
-                # 详情采集
-                if url:
-                    try:
-                        d = sc.fetch_detail(url)
-                        if d.get("description"):
-                            j["description"] = d["description"]
-                        j["hr_name"] = d.get("hr_name", "")
-                        j["hr_title"] = d.get("hr_title", "")
-                    except Exception as e:
-                        print(f"  详情失败: {e}")
-                    pause(1.5, 3.0)
-                j["url"] = url
-                if existing:
-                    update_application_from_job(existing["id"], j)
-                else:
-                    add_application(j)
-                n_saved += 1
-                mark = "✅" if (j.get("description") or "").strip() else "⚠️无JD"
-                print(f"  {mark} [{n_saved}/{max_jobs}] {j.get('title','')[:30]}")
+                combo = 0
+                for j in jobs:
+                    if combo >= per_query or _total_done():
+                        break
+                    url = _norm_url(j.get("url", ""))
+                    key = j.get("title", "") + j.get("salary", "") + j.get("company", "")
+                    if not url and key in seen:
+                        continue
+                    seen.add(key)
+                    # 已入库且已有JD全文 → 跳过详情采集(省时间)
+                    existing = get_application_by_url(url) if url else None
+                    if existing and (existing.get("description") or "").strip() and not refresh:
+                        continue
+                    # 详情采集
+                    if url:
+                        try:
+                            d = sc.fetch_detail(url)
+                            if d.get("description"):
+                                j["description"] = d["description"]
+                            j["hr_name"] = d.get("hr_name", "")
+                            j["hr_title"] = d.get("hr_title", "")
+                        except Exception as e:
+                            print(f"  详情失败: {e}")
+                        pause(1.5, 3.0)
+                    j["url"] = url
+                    if existing:
+                        update_application_from_job(existing["id"], j)
+                    else:
+                        add_application(j)
+                    combo += 1
+                    n_saved += 1
+                    mark = "✅" if (j.get("description") or "").strip() else "⚠️无JD"
+                    print(f"  {mark} [本组合 {combo}/{per_query} · 累计 {n_saved}] {j.get('title','')[:30]}")
+                print(f"  [组合完成] {kw} @ {city}: 采集 {combo} 条")
         print(f"\n[采集完成] 新增/刷新 {n_saved} 条")
     finally:
         sc.close()
@@ -426,11 +446,12 @@ def main():
     ap = argparse.ArgumentParser(description="简历-JD匹配报告")
     ap.add_argument("--keywords", help="搜索关键词, 逗号分隔, 如 \"AI Agent,Python开发\"")
     ap.add_argument("--city", default="全国", help="城市名, 逗号分隔可多个, 如 \"武汉,深圳,广州\"; 默认全国")
-    ap.add_argument("--max-jobs", type=int, default=20, help="本次采集上限, 默认20")
+    ap.add_argument("--per-query", type=int, default=30, help="每个 城市×关键词 组合采集条数(默认30)")
+    ap.add_argument("--max-total", type=int, default=0, help="全局采集上限(0=不限), 防止组合过多跑太久")
     ap.add_argument("--headless", action="store_true", help="无头模式运行浏览器")
     ap.add_argument("--refresh", action="store_true", help="强制重新采集已有岗位的JD")
     ap.add_argument("--report-only", action="store_true", help="跳过采集, 只分析库中已有数据")
-    ap.add_argument("--limit", type=int, default=50, help="分析最近N条(默认50)")
+    ap.add_argument("--limit", type=int, default=500, help="分析最近N条(默认500)")
     ap.add_argument("--keyword-only", action="store_true", help="不调LLM, 只做关键词分析(零成本)")
     ap.add_argument("--market", action="store_true", help="市场模式: 不比对简历, 只统计JD热词(无简历时自动进入)")
     ap.add_argument("--resume-file", help="从文本文件导入简历到设置页resume_summary")
@@ -454,7 +475,9 @@ def main():
             sys.exit(1)
         kws = [k.strip() for k in args.keywords.split(",") if k.strip()]
         cities = [c.strip() for c in args.city.split(",") if c.strip()] or ["全国"]
-        collect(kws, cities, args.max_jobs, args.headless, args.refresh)
+        n_combo = len(cities) * len(kws)
+        print(f"[计划] {n_combo} 个组合 × 每个{args.per_query}条, 预计约 {n_combo * args.per_query * 4 // 60 + 1} 分钟")
+        collect(kws, cities, args.per_query, args.max_total, args.headless, args.refresh)
         pause(1, 2)
 
     market = args.market or not _has_resume()
