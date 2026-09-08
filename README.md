@@ -114,20 +114,24 @@ $ lakejob status                       # 看浏览器+今日统计
 
 ## 📊 简历-JD 匹配报告（match_report.py）
 
-批量采集目标岗位 JD 全文 → 与你的简历摘要逐岗比对 → 按匹配度排序输出报告 + 关键词缺口建议。
+批量采集目标岗位 JD 全文 → 与你的简历摘要逐岗比对 → 按匹配度排序输出报告 + 关键词缺口建议；未导入简历时自动进入**市场模式**（只统计 JD 热门技能词，不涉及简历）。
 
 ```bash
 # 0. 首次使用先安装 Firefox 内核（Playwright 专用版，非日常浏览器，装一次即可）
 python -m playwright install firefox
 
-# 1. 扫码登录（只需一次）
+# 1. 登录（只需一次；命令行扫码或 Web 控制台扫码均可）
 python boss_firefox.py --login
 
 # 2. 导入简历文本（取前 3000 字，存入设置项 resume_summary；也可在 Web 设置页手填）
 python match_report.py --resume-file 我的简历.txt
 
-# 3. 采集 + 分析 + 出报告
-python match_report.py --keywords "AI Agent,Python开发" --city 广州 --max-jobs 20
+# 3. 采集 + 分析 + 出报告（无参数=全默认）
+python match_report.py
+#   默认: AI项目经理 @ 武汉, 每组合20条, 全局封顶50条
+
+# 自定义关键词与城市（参数均支持逗号分隔多值）
+python match_report.py --keywords "项目经理,AI产品经理,FDE" --city "武汉,深圳,广州"
 
 # 只分析库中已有 JD（跳过采集）
 python match_report.py --report-only
@@ -136,17 +140,19 @@ python match_report.py --report-only
 python match_report.py --report-only --keyword-only
 ```
 
-报告输出到 `~/AI/岗位日报/匹配报告_日期.md`，包含三部分：
+报告输出到 `~/AI/岗位日报/`：
 
-1. **匹配度排名表**（分数 / 结论 / 岗位 / 公司 / 薪资 / 主要差距）
-2. **每岗位详情**（关键技能、差距、投递建议、岗位链接）
-3. **关键词缺口分析** — JD 高频出现但简历未提及的技能，按出现频次排序（🔴≥10 / 🟡≥5 / 🟢），可作为简历补充关键词的依据
+- **市场热词报告_日期.md**（无简历时）：热门技能 TOP30（岗位数+占比+类别）、分类视图、岗位样本
+- **匹配报告_日期.md**（导入简历后）：① 匹配度排名表（分数/结论/岗位/公司/薪资/差距）② 每岗位详情（关键技能、差距、投递建议、岗位链接）③ 关键词缺口分析 — JD 高频出现但简历未提及的技能，按频次排序（🔴≥10 / 🟡≥5 / 🟢）
 
 说明：
 
+- 采集数量规则：每个「城市×关键词」组合各采 `--per-query` 条（默认 20），全局累计到 `--max-total` 停（默认 50，0=不限）
 - 配置 AI Key 后逐岗 LLM 智能打分，结果缓存于 `.boss_profile/match_cache.json`（简历变更后自动失效，不重复计费）；未配置则自动降级为关键词覆盖分析
 - 打分时简历摘要会发送至所配置的 AI 服务商，介意可使用 `--keyword-only` 模式（完全不调 AI）
-- 常用参数：`--city`（城市名，默认全国）、`--max-jobs`（采集上限，默认 20）、`--limit`（分析最近 N 条，默认 50）、`--refresh`（强制重新采集已有岗位）
+- 其他参数：`--limit`（分析最近 N 条，默认 500）、`--refresh`（强制重新采集已有岗位）
+
+> 新手请先读 **[📖 使用指南](docs/使用指南.md)**，含分步流程与 FAQ。
 
 ---
 
