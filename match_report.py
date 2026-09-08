@@ -424,16 +424,59 @@ def _fetch_jobs_with_jd(limit):
     return [dict(r) for r in rows]
 
 
+def _is_relevant(title: str, kws) -> bool:
+    """标题相关性: 搜索关键词的核心词根须出现在标题中。
+
+    规则: 把关键词按"AI/智能/人工智能"等修饰词拆出核心词根(如"AI项目经理"→"项目经理"),
+    标题至少包含一个核心词根(或其常见变体, 如"项目经理"≈"项目管理")才算相关。
+    """
+    MODIFIERS = ("ai", "人工智能", "智能")
+    # 常见等价变体: 命中任一即算词根出现
+    VARIANTS = {"项目经理": ("项目经理", "项目管理", "项目主管"), "产品经理": ("产品经理", "产品管理")}
+
+    def _hit(core: str, title: str) -> bool:
+        for k, vs in VARIANTS.items():
+            if k in core or core in k:
+                return any(v in title for v in vs)
+        return core in title
+
+    title = (title or "").lower()
+    for kw in kws:
+        core = kw.lower()
+        for m in MODIFIERS:
+            core = core.replace(m, "").strip()
+        if not core:
+            continue
+        for part in [p for p in re.split(r"[/\s]+", core) if len(p) >= 2]:
+            if _hit(part, title):
+                return True
+    return False
+
+
+def _split_jobs(jobs_all, kws):
+    """三路分流: 相关岗位 / 弱相关(标题不含关键词词根) / 噪音(黑名单)。
+    弱相关和噪音都不进统计, 在报告中单列可复核。"""
+    noise_words = _load_noise_words()
+    jobs, weak_jobs, noise_jobs = [], [], []
+    for j in jobs_all:
+        t = j.get("job_title") or ""
+        if _is_noise(t, noise_words):
+            noise_jobs.append(j)
+        elif not _is_relevant(t, kws):
+            weak_jobs.append(j)
+        else:
+            jobs.append(j)
+    return jobs, weak_jobs, noise_jobs
+
+
 def analyze_market(limit, kws=None):
-    """市场模式：不比对简历。噪音过滤 + JD技能词频 + 薪资/经验/学历统计。"""
+    """市场模式：不比对简历。相关性过滤 + 噪音过滤 + JD技能词频 + 薪资/经验/学历统计。"""
     jobs_all = _fetch_jobs_with_jd(limit)
     if not jobs_all:
         print("库中没有含JD全文的岗位, 请先采集(--keywords ...)")
         sys.exit(1)
-    noise_words = _load_noise_words()
-    jobs, noise_jobs = [], []
-    for j in jobs_all:
-        (noise_jobs if _is_noise(j.get("job_title") or "", noise_words) else jobs).append(j)
+    kws = kws or ["项目经理"]
+    jobs, weak_jobs, noise_jobs = _split_jobs(jobs_all, kws)
 
     freq = Counter()
     cats = {}  # 技能小写 -> 类别
@@ -446,8 +489,11 @@ def analyze_market(limit, kws=None):
                 cats.setdefault(s.lower(), cat)
         for s in found:
             freq[s] += 1
-    print(f"[市场分析] 有效{len(jobs)}个岗位(过滤噪音{len(noise_jobs)}个), 提取到 {len(freq)} 个技能词")
-    return jobs, noise_jobs, freq.most_common(), cats
+    print(
+        f"[市场分析] 强相关{len(jobs)}个 · 剔除弱相关{len(weak_jobs)}个(标题不含关键词词根) · "
+        f"剔除噪音{len(noise_jobs)}个 · 提取到 {len(freq)} 个技能词"
+    )
+    return jobs, weak_jobs, noise_jobs, freq.most_common(), cats
 
 
 def analyze_match(limit, keyword_only):
@@ -660,13 +706,14 @@ def build_report(results, resume, mode):
     return "\n".join(lines), today
 
 
-def build_market_report(jobs, noise_jobs, freq, cats):
-    """市场模式报告：市场画像（薪资/经验/学历 + 热词 + 分类 + 样本 + 过滤名单），不涉及简历。"""
+def build_market_report(jobs, weak_jobs, noise_jobs, freq, cats):
+    """市场模式报告：市场画像（薪资/经验/学历 + 热词 + 分类 + 样本 + 剔除清单），不涉及简历。"""
     today = date.today().isoformat()
     total = len(jobs)
     lines = [f"# 市场热词报告 · {today}", ""]
     lines.append(
-        f"> 有效样本: **{total} 个岗位**(JD全文) · 过滤噪音 **{len(noise_jobs)}** 个 · "
+        f"> 强相关样本: **{total} 个岗位**(JD全文) · 剔除弱相关 **{len(weak_jobs)}** 个(标题不含关键词词根) · "
+        f"剔除噪音 **{len(noise_jobs)}** 个(标题黑名单) · "
         f"提取技能词 **{len(freq)}** 个 · 市场模式(未导入简历, 仅统计市场需求)"
     )
     lines.append("")
@@ -704,8 +751,17 @@ def build_market_report(jobs, noise_jobs, freq, cats):
     lines.extend(_job_sample_lines(jobs))
     lines.append("")
 
+    if weak_jobs:
+        lines.append("## 五、已剔除的弱相关岗位(标题不含关键词词根, 未参与统计)")
+        lines.append("")
+        for j in weak_jobs[:20]:
+            lines.append(f"- {j.get('job_title') or ''} · {j.get('company') or ''} · {j.get('salary') or ''}")
+        lines.append("")
+        lines.append("> 判定规则：岗位标题须包含搜索关键词的核心词根（去掉 AI/智能/人工智能 等修饰词），BOSS 相关性召回的其他岗位在此剔除。")
+        lines.append("")
+
     if noise_jobs:
-        lines.append("## 五、已过滤的疑似无关岗位(标题命中黑名单, 未参与统计)")
+        lines.append("## 六、已过滤的疑似无关岗位(标题命中黑名单, 未参与统计)")
         lines.append("")
         for j in noise_jobs[:20]:
             lines.append(f"- {j.get('job_title') or ''} · {j.get('company') or ''} · {j.get('salary') or ''}")
@@ -781,12 +837,12 @@ def main():
     if market:
         if not args.market:
             print("[提示] 未检测到有效简历, 自动进入市场模式(仅统计JD热词); 导入简历后自动切换为匹配模式")
-        jobs, noise_jobs, freq, cats = analyze_market(args.limit, kws_used)
-        report, today = build_market_report(jobs, noise_jobs, freq, cats)
+        jobs, weak_jobs, noise_jobs, freq, cats = analyze_market(args.limit, kws_used)
+        report, today = build_market_report(jobs, weak_jobs, noise_jobs, freq, cats)
         report = report.replace(f"# 市场热词报告 · {today}", f"# 市场热词报告 · {report_title}", 1)
         report = report.replace("## 一、市场画像", "\n".join(method_lines) + "## 一、市场画像", 1)
         summary = (
-            f"有效{len(jobs)}个岗位(过滤噪音{len(noise_jobs)}个)"
+            f"强相关{len(jobs)}个岗位(剔除弱相关{len(weak_jobs)}个、噪音{len(noise_jobs)}个)"
             + (f", 热词TOP1: {freq[0][0]}({freq[0][1]}个岗位)" if freq else "")
         )
     else:
