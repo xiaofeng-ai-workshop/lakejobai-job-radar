@@ -444,10 +444,10 @@ def build_market_report(jobs, freq, cats):
 
 def main():
     ap = argparse.ArgumentParser(description="简历-JD匹配报告")
-    ap.add_argument("--keywords", help="搜索关键词, 逗号分隔, 如 \"AI Agent,Python开发\"")
-    ap.add_argument("--city", default="全国", help="城市名, 逗号分隔可多个, 如 \"武汉,深圳,广州\"; 默认全国")
-    ap.add_argument("--per-query", type=int, default=30, help="每个 城市×关键词 组合采集条数(默认30)")
-    ap.add_argument("--max-total", type=int, default=0, help="全局采集上限(0=不限), 防止组合过多跑太久")
+    ap.add_argument("--keywords", default="AI项目经理", help="搜索关键词, 逗号分隔可多个; 默认 AI项目经理")
+    ap.add_argument("--city", default="武汉", help="城市名, 逗号分隔可多个, 如 \"武汉,深圳,广州\"; 默认武汉")
+    ap.add_argument("--per-query", type=int, default=20, help="每个 城市×关键词 组合采集条数(默认20)")
+    ap.add_argument("--max-total", type=int, default=50, help="全局采集上限(默认50, 0=不限)")
     ap.add_argument("--headless", action="store_true", help="无头模式运行浏览器")
     ap.add_argument("--refresh", action="store_true", help="强制重新采集已有岗位的JD")
     ap.add_argument("--report-only", action="store_true", help="跳过采集, 只分析库中已有数据")
@@ -470,11 +470,8 @@ def main():
         print(f"[OK] 已导入简历({len(text)}字, 截取前3000字)到 resume_summary")
 
     if not args.report_only:
-        if not args.keywords:
-            print("请指定 --keywords, 或使用 --report-only 分析已有数据")
-            sys.exit(1)
         kws = [k.strip() for k in args.keywords.split(",") if k.strip()]
-        cities = [c.strip() for c in args.city.split(",") if c.strip()] or ["全国"]
+        cities = [c.strip() for c in args.city.split(",") if c.strip()] or ["武汉"]
         n_combo = len(cities) * len(kws)
         print(f"[计划] {n_combo} 个组合 × 每个{args.per_query}条, 预计约 {n_combo * args.per_query * 4 // 60 + 1} 分钟")
         collect(kws, cities, args.per_query, args.max_total, args.headless, args.refresh)
