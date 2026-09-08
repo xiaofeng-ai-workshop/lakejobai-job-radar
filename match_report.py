@@ -552,14 +552,18 @@ def keyword_gap(results, resume):
 
 
 def _skill_contexts(jobs, top_skills, per_skill=3):
-    """Top技能在JD中的原文要求摘录: 抽含该技能词的句子, 跨岗位去重, 每技能取per_skill条。"""
+    """Top技能在JD中的原文要求摘录: 抽含该技能词的句子, 按公司分组(组内去重)。
+
+    返回 {skill: [(company, [sent, ...]), ...]} —— 每个公司一个组, 组内是该公司的相关句子,
+    便于对比不同公司对同一技能的要求差异。
+    """
     result = {}
     for skill, _n in top_skills:
-        quotes = []
-        seen = set()
+        by_company = {}
         for j in jobs:
-            if len(quotes) >= per_skill:
-                break
+            company = (j.get("company") or "未知公司").strip()
+            sents = []
+            seen = set()
             text = (j.get("description") or "") + "\n" + (j.get("job_title") or "")
             for sent in re.split(r"[。；;！？\n]", text):
                 sent = sent.strip()
@@ -571,12 +575,25 @@ def _skill_contexts(jobs, top_skills, per_skill=3):
                 if key in seen:
                     continue
                 seen.add(key)
-                company = (j.get("company") or "")[:8]
-                quotes.append((sent, company, j.get("job_title") or ""))
-                if len(quotes) >= per_skill:
+                sents.append(sent)
+            if sents:
+                # 同名公司(不同岗位)合并
+                if company in by_company:
+                    by_company[company].extend(sents)
+                else:
+                    by_company[company] = sents
+        groups = list(by_company.items())
+        if per_skill and sum(len(s) for _, s in groups) > per_skill:
+            # 限量模式: 按公司顺序截断
+            kept, total = [], 0
+            for c, sents in groups:
+                if total >= per_skill:
                     break
-        if quotes:
-            result[skill] = quotes
+                kept.append((c, sents))
+                total += len(sents)
+            groups = kept
+        if groups:
+            result[skill] = groups
     return result
 
 
@@ -758,18 +775,22 @@ def build_market_report(jobs, weak_jobs, noise_jobs, freq, cats):
         lines.append("*样本数据不足以统计薪资/经验/学历分布*")
         lines.append("")
 
-    # 全部技能的JD原文要求(规则抽取, 后续可接LLM做智能归纳)
-    ctx = _skill_contexts(jobs, freq[:30], per_skill=99)
+    # 全部技能的JD原文要求(按公司分组, 后续可接LLM做智能归纳)
+    ctx = _skill_contexts(jobs, freq[:30], per_skill=0)
 
-    lines.append("## 二、热门技能词 TOP 30（含 JD 原文要求，点击展开）")
+    lines.append("## 二、热门技能词 TOP 30（含 JD 原文要求，按公司分组，点击展开）")
     lines.append("")
     lines.append("| # | 技能 | 出现岗位数 | 占比 | 类别 | JD 原文要求 |")
     lines.append("|---|------|-----------|------|------|-------------|")
     for i, (s, n) in enumerate(freq[:30], 1):
-        quotes = ctx.get(s) or []
-        if quotes:
-            qtexts = "<br>".join(f"{qi}. {q}（{c}）" for qi, (q, c, _jt) in enumerate(quotes, 1))
-            jd_cell = f"<details><summary>展开{len(quotes)}条</summary>{qtexts}</details>"
+        groups = ctx.get(s) or []
+        if groups:
+            n_all = sum(len(sents) for _, sents in groups)
+            parts = []
+            for c, sents in groups:
+                items = "".join(f"<br>{qi}. {sent}" for qi, sent in enumerate(sents, 1))
+                parts.append(f"<b>{c}</b>{items}")
+            jd_cell = f"<details><summary>展开 {len(groups)} 家公司 / {n_all} 条</summary>" + "".join(parts) + "</details>"
         else:
             jd_cell = "—"
         lines.append(f"| {i} | {s} | {n} | {n * 100 // max(total, 1)}% | {cats.get(s, '')} | {jd_cell} |")
