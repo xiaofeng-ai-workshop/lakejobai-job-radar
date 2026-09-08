@@ -1,6 +1,6 @@
 # lakejobai-job-radar
 
-> AI Agent 专用的 BOSS 直聘自动化工具。CLI 提供 14 条命令，stdout JSON 信封，Agent 友好。
+> AI Agent 专用的 BOSS 直聘自动化工具。CLI 提供 18 条命令（与 [README](README.md) 的 CLI 章节一致），stdout JSON 信封，Agent 友好。
 
 ## Install
 
@@ -8,7 +8,7 @@
 git clone https://github.com/longnull-ck/lakejobai-job-radar.git
 cd lakejobai-job-radar
 pip install -e .
-playwright install firefox
+python -m playwright install firefox
 ```
 
 ## First Minute
@@ -24,7 +24,7 @@ lakejob status                         # 检查登录态
 
 完成标准：
 - `lakejob doctor` 返回 `ok=true`
-- `lakejob schema` 返回 12 个可用命令
+- `lakejob schema` 返回 18 个可用命令（与本表对应）
 - `lakejob status` 返回 `browser_running: true`
 
 **如 `browser_running: false`**：提示用户在浏览器打开 `http://127.0.0.1:8010`，设置页启动浏览器并扫码登录。
@@ -68,10 +68,16 @@ lakejob stats
 | `conversations` | — | — | HR 会话列表 |
 | `chat` | `CONV_ID` | — | 查看聊天记录 |
 | `send` | `CONV_ID` | `--msg` | 手动发消息 |
+| `scan` | — | `--max-pages` | 翻页扫描(不投递) |
+| `scan-apply` | — | `--max-pages` | 翻页扫描投递(公司去重 + HR 过滤) |
+| `apply` | `JOB_URL` | — | 投递单个 |
+| `apply-batch` | — | `--status` | 批量投递 |
 | `analyze` | `JOB_URL` | `--title` `--company` `--desc` | AI JD 分析 |
 | `shortlist` | `ACTION` | `--job-url` `--title` `--id` | 候选池管理 |
-| `schema` | — | — | 输出工具描述 |
+| `login` | — | — | 触发扫码登录 |
+| `schema` | — | — | 输出工具描述(18 个) |
 | `doctor` | — | — | 环境诊断 |
+| `version` | — | — | 版本号 |
 | `server` | — | `--start` `--stop` `--port` | 管理后台服务 |
 
 ---

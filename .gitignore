@@ -31,3 +31,9 @@ id_ecdsa*
 *.pfx
 secrets/
 .credentials/
+
+# reports
+reports/
+
+# WorkBuddy 工作数据(memory / 会话缓存)
+.workbuddy/

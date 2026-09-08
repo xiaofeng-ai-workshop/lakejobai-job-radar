@@ -14,13 +14,19 @@
   python match_report.py --resume-file 我的简历.txt
 
   # 2. 采集 + 分析 + 报告
-  python match_report.py --keywords "AI Agent,Linux运维" --city 广州 --max-jobs 20
+  python match_report.py --keywords "AI Agent,Linux运维" --city 广州 --per-query 20 --max-total 50
 
   # 只分析库中已有 JD, 不再采集
   python match_report.py --report-only
 
   # 只刷新关键词缺口(不调LLM, 零成本)
   python match_report.py --report-only --keyword-only
+
+  # 宽词搜(如"项目经理")推荐加 --tech-only, 排除建筑/制造/金融/政务等非软件 PM
+  python match_report.py --keywords "项目经理" --city 武汉 --tech-only
+
+  # 只看本次入库的岗位(默认近 60 分钟, 配合 --report-only 复盘单次采集)
+  python match_report.py --report-only --only-new --new-since-minutes 60
 
 说明:
   - 有 DeepSeek API Key(设置页配置)时逐岗打分; 没有则自动降级为关键词覆盖率打分
@@ -34,6 +40,8 @@ import random
 import re
 import sys
 import time
+import urllib.request
+import urllib.error
 from collections import Counter
 from datetime import date
 from pathlib import Path
@@ -159,6 +167,21 @@ def _is_noise(title: str, noise_words) -> bool:
     return any(w in (title or "") for w in noise_words)
 
 
+# 软件向领域词: 标题或JD含其中任一词, 才算"软件相关岗位"(--tech-only 开启时)
+TECH_WORDS = (
+    "软件", "互联网", "IT", "信息化", "数字化", "SaaS", "计算机",
+    "程序员", "开发", "算法", "大数据", "人工智能", "AI", "ai",
+    "系统集成", "智能", "数据", "系统", "App", "app", "平台",
+    "Java", "Python", "研发", "产品", "云计算", "云", "科技",
+)
+
+
+def _is_tech_job(j) -> bool:
+    """标题或JD文本含软件/互联网领域词 → 算软件向岗位。"""
+    probe = (j.get("job_title") or "") + " " + (j.get("description") or "")[:500]
+    return any(w in probe for w in TECH_WORDS)
+
+
 def _parse_salary_k(s: str):
     """'23-29K·24薪' -> (23, 29); '361-461元/天'等日薪/异常格式 -> None"""
     m = re.search(r"(\d+)-(\d+)K", s or "")
@@ -243,9 +266,41 @@ def _resolve_city_code(name: str) -> str:
 
 # ── 采集 ──────────────────────────────────────────────
 
+def _check_web_console_conflict(port: int = 8010):
+    """采集前检查 Web 控制台是否正占用同一个 Firefox profile。
+
+    - 8010 端口无响应 → 静默通过（控制台没跑）
+    - 端口有响应但 browser_running=False → 通过（控制台在但没启浏览器, 不冲突）
+    - 端口有响应且 browser_running=True → 报错退出, 给出明确操作步骤
+    """
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/status", method="GET")
+        with urllib.request.urlopen(req, timeout=1) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, ConnectionRefusedError, OSError, json.JSONDecodeError, ValueError):
+        return  # 控制台没跑 / 不响应 / 返回非 JSON, 都视为不冲突
+    if not data.get("browser_running"):
+        return
+    print("=" * 64, file=sys.stderr)
+    print("❌ 检测到 Web 控制台 (boss_app.py) 正在运行且浏览器已启动", file=sys.stderr)
+    print("=" * 64, file=sys.stderr)
+    print("match_report.py 和 boss_app.py 共用同一个 Firefox profile (.boss_profile/),", file=sys.stderr)
+    print("同时启 Firefox 会报 'Failed to launch the browser process'。", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("请按以下任一方式解决:", file=sys.stderr)
+    print("  1) Web 控制台「设置」页 → 点击「停止浏览器」(只关浏览器, 服务还在)", file=sys.stderr)
+    print("  2) Ctrl+C 关闭 boss_app 服务(连浏览器一起关)", file=sys.stderr)
+    print("  3) 改用 Web 控制台完成本次扫描投递, 不要跑这个脚本", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("确认 Web 控制台浏览器已关后, 重新跑本命令。", file=sys.stderr)
+    print("=" * 64, file=sys.stderr)
+    sys.exit(1)
+
+
 def collect(keywords, cities, per_query, max_total, headless, refresh):
     """搜索 + 详情采集, 结果入库。每个 城市×关键词 组合各采 per_query 条。
     返回 (n_saved, search_urls): search_urls = [{'kw','city','url'}], 供报告记录采集方法。"""
+    _check_web_console_conflict()  # 启 Firefox 前先确认没和 Web 控制台撞 profile
     sc = BossScraper(headless=headless)
     sc.start()
     search_urls = []
@@ -425,13 +480,23 @@ def _has_resume() -> bool:
     return len(r) >= 60
 
 
-def _fetch_jobs_with_jd(limit):
-    rows = get_db().execute(
-        """SELECT * FROM applications
-           WHERE description IS NOT NULL AND length(description) > 50
-           ORDER BY id DESC LIMIT ?""",
-        (limit,),
-    ).fetchall()
+def _fetch_jobs_with_jd(limit, since_minutes=None):
+    """取含 JD 全文的岗位。since_minutes=N → 只取最近 N 分钟内入库(配合 --only-new)。"""
+    if since_minutes:
+        rows = get_db().execute(
+            """SELECT * FROM applications
+               WHERE description IS NOT NULL AND length(description) > 50
+                 AND created_at >= datetime('now', ?)
+               ORDER BY id DESC LIMIT ?""",
+            (f"-{int(since_minutes)} minutes", limit),
+        ).fetchall()
+    else:
+        rows = get_db().execute(
+            """SELECT * FROM applications
+               WHERE description IS NOT NULL AND length(description) > 50
+               ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -483,14 +548,29 @@ def _split_jobs(jobs_all, kws):
     return jobs, weak_jobs, noise_jobs
 
 
-def analyze_market(limit, kws=None):
-    """市场模式：不比对简历。相关性过滤 + 噪音过滤 + JD技能词频 + 薪资/经验/学历统计。"""
-    jobs_all = _fetch_jobs_with_jd(limit)
+def analyze_market(limit, kws=None, tech_only=False, since_minutes=None):
+    """市场模式：不比对简历。相关性过滤 + 噪音过滤 + 可选软件向过滤 + JD技能词频 + 薪资/经验/学历统计。
+
+    tech_only=True → 在相关性过滤后, 进一步用 _is_tech_job 排除非软件/互联网岗位,
+                     这些岗位进 non_tech_jobs 单独列出(可复核), 不参与统计。
+    since_minutes   → 只取最近 N 分钟入库(配合 --only-new)。
+    """
+    jobs_all = _fetch_jobs_with_jd(limit, since_minutes=since_minutes)
     if not jobs_all:
         print("库中没有含JD全文的岗位, 请先采集(--keywords ...)")
         sys.exit(1)
     kws = kws or ["项目经理"]
     jobs, weak_jobs, noise_jobs = _split_jobs(jobs_all, kws)
+
+    non_tech_jobs = []
+    if tech_only:
+        kept, dropped = [], []
+        for j in jobs:
+            (kept if _is_tech_job(j) else dropped).append(j)
+        non_tech_jobs = dropped
+        jobs = kept
+        if not jobs:
+            print("[警告] tech_only 过滤后没有剩余岗位, 报告将几乎全空; 考虑去掉 --tech-only")
 
     freq = Counter()
     cats = {}  # 技能小写 -> 类别
@@ -505,25 +585,48 @@ def analyze_market(limit, kws=None):
             freq[s] += 1
     print(
         f"[市场分析] 强相关{len(jobs)}个 · 剔除弱相关{len(weak_jobs)}个(标题不含关键词词根) · "
-        f"剔除噪音{len(noise_jobs)}个 · 提取到 {len(freq)} 个技能词"
+        f"剔除噪音{len(noise_jobs)}个(标题黑名单)"
+        + (f" · 剔除非软件{len(non_tech_jobs)}个(--tech-only)" if tech_only else "")
+        + f" · 提取到 {len(freq)} 个技能词"
     )
-    return jobs, weak_jobs, noise_jobs, freq.most_common(), cats
+    return jobs, weak_jobs, noise_jobs, non_tech_jobs, freq.most_common(), cats
 
 
-def analyze_match(limit, keyword_only):
-    """匹配模式：与 resume_summary 比对打分排序。"""
+def analyze_match(limit, keyword_only, tech_only=False, since_minutes=None):
+    """匹配模式：与 resume_summary 比对打分排序。
+
+    tech_only=True → 在评分前先过滤掉非软件/互联网岗位(用 _is_tech_job),
+                     被过滤的进 non_tech_jobs 单独列出(报告里单节, 可复核)。
+    since_minutes   → 只取最近 N 分钟入库(配合 --only-new)。
+    """
     resume = (get_setting("resume_summary") or "").strip()
     if not _has_resume():
         print("简历摘要无效(过短或为空模板)! 请用 --resume-file 导入, 或使用市场模式 --market")
         sys.exit(1)
-    jobs = _fetch_jobs_with_jd(limit)
+    jobs = _fetch_jobs_with_jd(limit, since_minutes=since_minutes)
     if not jobs:
         print("库中没有含JD全文的岗位, 请先采集(--keywords ...) 或在Web控制台搜索扫描")
         sys.exit(1)
 
+    non_tech_jobs = []
+    if tech_only:
+        kept, dropped = [], []
+        for j in jobs:
+            (kept if _is_tech_job(j) else dropped).append(j)
+        non_tech_jobs = dropped
+        jobs = kept
+        if not jobs:
+            print("[警告] tech_only 过滤后没有剩余岗位, 考虑去掉 --tech-only")
+
     use_llm = (not keyword_only) and _llm_available()
     mode = "LLM智能分析" if use_llm else "关键词覆盖分析(未配置AI Key或指定--keyword-only)"
-    print(f"[分析] {len(jobs)} 个岗位 · 模式: {mode}")
+    scope = []
+    if since_minutes:
+        scope.append(f"近{int(since_minutes)}分钟入库")
+    if tech_only:
+        scope.append("软件向")
+    scope_str = f" · 范围: {'/'.join(scope)}" if scope else ""
+    print(f"[分析] {len(jobs)} 个岗位 · 模式: {mode}{scope_str}")
 
     cache = _load_cache() if use_llm else {}
     results, failed = [], 0
@@ -542,7 +645,7 @@ def analyze_match(limit, keyword_only):
         print(f"  [跳过] {failed} 个岗位无法解析")
 
     results.sort(key=lambda x: -int(x[1].get("match_score") or 0))
-    return results, resume, mode
+    return results, resume, mode, non_tech_jobs
 
 
 # ── 关键词缺口聚合 ────────────────────────────────────
@@ -666,10 +769,16 @@ def _is_campus_job(j) -> bool:
     return any(w in probe for w in ("校招", "应届", "校方", "校园"))
 
 
-def _job_sample_lines(jobs, top=40):
-    """岗位样本行: 应届/校招岗排最后, 其余按HR活跃度; JD全文折叠块缩进到列表项内"""
+def _job_sample_lines(jobs, top=None):
+    """岗位样本行: 应届/校招岗排最后, 其余按HR活跃度; JD全文折叠块缩进到列表项内。
+
+    top=None → 显示全部进入统计的岗位(默认行为, 不再丢岗位);
+    top=N   → 报告过大时手动限前 N 个。
+    """
     ordered = sorted(jobs, key=_hr_sort_key)
     ordered = [j for j in ordered if not _is_campus_job(j)] + [j for j in ordered if _is_campus_job(j)]
+    if top is not None:
+        ordered = ordered[:top]
     out = []
     for i, j in enumerate(ordered[:top], 1):
         title = j["job_title"]
@@ -694,11 +803,17 @@ def _job_sample_lines(jobs, top=40):
     return out
 
 
-def build_report(results, resume, mode):
+def build_report(results, resume, mode, non_tech_jobs=None):
     today = date.today().isoformat()
     scores = [int(r.get("match_score") or 0) for _, r in results]
     lines = [f"# 简历-JD 匹配报告 · {today}", ""]
-    lines.append(f"> 分析模式: **{mode}** · 岗位数: **{len(results)}** · 平均分: **{sum(scores)//max(len(scores),1)}**")
+    non_tech_jobs = non_tech_jobs or []
+    extra = " · 软件向" if (results and _is_tech_job(results[0][0])) and False else ""  # 头部由 main 的 suffix 控制, 这里不强加
+    scope_note = ""
+    # 若 --tech-only 且存在过滤, 头部明确
+    if non_tech_jobs:
+        scope_note = f" · 剔除非软件 {len(non_tech_jobs)} 个(--tech-only)"
+    lines.append(f"> 分析模式: **{mode}** · 岗位数: **{len(results)}** · 平均分: **{sum(scores)//max(len(scores),1)}**{scope_note}")
     lines.append(f"> 简历摘要(前100字): {resume[:100]}...")
     lines.append("")
     lines.append("## 一、匹配度排名(高→低)")
@@ -761,20 +876,41 @@ def build_report(results, resume, mode):
             p = "🔴" if n >= 10 else "🟡" if n >= 5 else "🟢"
             lines.append(f"- {p} **{s}** ({n}个岗位)")
         lines.append("")
-    lines.append("---")
+
+    if non_tech_jobs:
+        lines.append("## 五、已过滤的非软件岗位(--tech-only, 未参与打分) · 全部列出")
+        lines.append("")
+        for i, j in enumerate(non_tech_jobs, 1):
+            title = j.get("job_title") or ""
+            url = (j.get("job_url") or "").strip()
+            head = f"[{title}]({url})" if url else title
+            lines.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''}")
+        lines.append("")
+        lines.append("> 判定规则：标题或 JD 前 500 字命中 软件/互联网/IT/信息化/数字化/SaaS/AI/系统集成/研发/产品/云计算/科技 等领域词才算软件向。")
+        lines.append("> 搜『项目经理』『产品经理』等宽词时强烈推荐加 `--tech-only`，避免被建筑/制造/金融/政务等行业的 PM 岗稀释打分。")
+        lines.append("")
+        lines.append("---")
+    else:
+        lines.append("---")
     lines.append(f"*生成于 {today} · lakejobai-job-radar match_report.py · 前提: 简历内容真实, 不建议堆砌未掌握的关键词*")
     return "\n".join(lines), today
 
 
-def build_market_report(jobs, weak_jobs, noise_jobs, freq, cats):
-    """市场模式报告：市场画像（薪资/经验/学历 + 热词 + 分类 + 样本 + 剔除清单），不涉及简历。"""
+def build_market_report(jobs, weak_jobs, noise_jobs, non_tech_jobs, freq, cats):
+    """市场模式报告：市场画像（薪资/经验/学历 + 热词 + 分类 + 样本 + 剔除清单），不涉及简历。
+
+    所有"剔除/过滤"清单均完整展示(不截断), 方便用户复核。
+    """
     today = date.today().isoformat()
     total = len(jobs)
     lines = [f"# 市场热词报告 · {today}", ""]
+    has_non_tech = bool(non_tech_jobs)
+    extra = " · 软件向" if has_non_tech else ""
     lines.append(
         f"> 强相关样本: **{total} 个岗位**(JD全文) · 剔除弱相关 **{len(weak_jobs)}** 个(标题不含关键词词根) · "
-        f"剔除噪音 **{len(noise_jobs)}** 个(标题黑名单) · "
-        f"提取技能词 **{len(freq)}** 个 · 市场模式(未导入简历, 仅统计市场需求)"
+        f"剔除噪音 **{len(noise_jobs)}** 个(标题黑名单)"
+        + (f" · 剔除非软件 **{len(non_tech_jobs)}** 个(--tech-only)" if has_non_tech else "")
+        + f" · 提取技能词 **{len(freq)}** 个 · 市场模式(未导入简历, 仅统计市场需求){extra}"
     )
     lines.append("")
     lines.append("## 一、市场画像（薪资 / 经验 / 学历）")
@@ -827,9 +963,9 @@ def build_market_report(jobs, weak_jobs, noise_jobs, freq, cats):
     lines.append("")
 
     if weak_jobs:
-        lines.append("## 五、已剔除的弱相关岗位(标题不含关键词词根, 未参与统计)")
+        lines.append("## 五、已剔除的弱相关岗位(标题不含关键词词根, 未参与统计) · 全部列出")
         lines.append("")
-        for i, j in enumerate(weak_jobs[:20], 1):
+        for i, j in enumerate(weak_jobs, 1):
             title = j.get("job_title") or ""
             url = (j.get("job_url") or "").strip()
             head = f"[{title}]({url})" if url else title
@@ -839,15 +975,28 @@ def build_market_report(jobs, weak_jobs, noise_jobs, freq, cats):
         lines.append("")
 
     if noise_jobs:
-        lines.append("## 六、已过滤的疑似无关岗位(标题命中黑名单, 未参与统计)")
+        lines.append("## 六、已过滤的疑似无关岗位(标题命中黑名单, 未参与统计) · 全部列出")
         lines.append("")
-        for i, j in enumerate(noise_jobs[:20], 1):
+        for i, j in enumerate(noise_jobs, 1):
             title = j.get("job_title") or ""
             url = (j.get("job_url") or "").strip()
             head = f"[{title}]({url})" if url else title
             lines.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''}")
         lines.append("")
         lines.append("> 黑名单默认: 销售/投资/合伙人/猎头/讲师/加盟/招商/渠道/保险/房产等; 可在 Web 设置页 `noise_filter_keywords` 追加自定义词(逗号分隔)。")
+        lines.append("")
+
+    if non_tech_jobs:
+        lines.append("## 七、已过滤的非软件岗位(--tech-only, 未参与统计) · 全部列出")
+        lines.append("")
+        for i, j in enumerate(non_tech_jobs, 1):
+            title = j.get("job_title") or ""
+            url = (j.get("job_url") or "").strip()
+            head = f"[{title}]({url})" if url else title
+            lines.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''}")
+        lines.append("")
+        lines.append("> 判定规则：标题或 JD 前 500 字命中 软件/互联网/IT/信息化/数字化/SaaS/AI/系统集成/研发/产品/云计算/科技 等领域词才算软件向。")
+        lines.append("> 搜『项目经理』『产品经理』等宽词时强烈推荐加 `--tech-only`，避免被建筑/制造/金融/政务等行业的 PM 岗稀释统计。")
         lines.append("")
 
     lines.append("---")
@@ -868,6 +1017,14 @@ def main():
     ap.add_argument("--keyword-only", action="store_true", help="不调LLM, 只做关键词分析(零成本)")
     ap.add_argument("--market", action="store_true", help="市场模式: 不比对简历, 只统计JD热词(无简历时自动进入)")
     ap.add_argument("--resume-file", help="从文本文件导入简历到设置页resume_summary")
+    ap.add_argument("--tech-only", action=argparse.BooleanOptionalAction, default=True,
+                    help="只保留软件/互联网领域岗位(标题或JD前500字含 软件/IT/SaaS/AI/研发/产品 等); "
+                         "其余单列'已过滤的非软件岗位'可复核. 搜『项目经理』『产品经理』等宽词时强烈推荐. "
+                         "默认开启; 用 --no-tech-only 关闭.")
+    ap.add_argument("--only-new", action="store_true",
+                    help="只分析最近 --new-since-minutes 分钟内入库的岗位(配合 --report-only 复盘单次采集结果).")
+    ap.add_argument("--new-since-minutes", type=int, default=60,
+                    help="--only-new 的时间窗口(分钟), 默认 60.")
     args = ap.parse_args()
 
     if args.resume_file:
@@ -898,7 +1055,15 @@ def main():
     kw_part = "+".join(kws_used)[:30]
     city_part = "+".join(cities_used)[:20]
     y, m, d = date.today().strftime("%Y-%m-%d").split("-")
-    report_title = f"{y}年{m}月{d}日-{kw_part}（{city_part}）"
+    suffix_parts = []
+    if args.tech_only:
+        suffix_parts.append("软件向")
+    scope_label = None
+    if args.report_only and args.only_new:
+        scope_label = f"本次{int(args.new_since_minutes)}分钟"
+        suffix_parts.append(scope_label)
+    suffix_str = "·" + "·".join(suffix_parts) if suffix_parts else ""
+    report_title = f"{y}年{m}月{d}日-{kw_part}（{city_part}）{suffix_str}"
 
     # 采集方法章节: 本次采集的实时URL优先; --report-only 时读DB持久化的历史搜索URL
     if not search_urls:
@@ -928,20 +1093,28 @@ def main():
     if market:
         if not args.market:
             print("[提示] 未检测到有效简历, 自动进入市场模式(仅统计JD热词); 导入简历后自动切换为匹配模式")
-        jobs, weak_jobs, noise_jobs, freq, cats = analyze_market(args.limit, kws_used)
-        report, today = build_market_report(jobs, weak_jobs, noise_jobs, freq, cats)
+        since = int(args.new_since_minutes) if (args.report_only and args.only_new) else None
+        jobs, weak_jobs, noise_jobs, non_tech_jobs, freq, cats = analyze_market(
+            args.limit, kws_used, tech_only=args.tech_only, since_minutes=since
+        )
+        report, today = build_market_report(jobs, weak_jobs, noise_jobs, non_tech_jobs, freq, cats)
         report = report.replace(f"# 市场热词报告 · {today}", f"# 市场热词报告 · {report_title}", 1)
         report = report.replace("## 一、市场画像", "\n".join(method_lines) + "## 一、市场画像", 1)
         summary = (
-            f"强相关{len(jobs)}个岗位(剔除弱相关{len(weak_jobs)}个、噪音{len(noise_jobs)}个)"
+            f"强相关{len(jobs)}个岗位(剔除弱相关{len(weak_jobs)}个、噪音{len(noise_jobs)}个"
+            + (f"、非软件{len(non_tech_jobs)}个" if non_tech_jobs else "")
+            + ")"
             + (f", 热词TOP1: {freq[0][0]}({freq[0][1]}个岗位)" if freq else "")
         )
     else:
-        results, resume, mode = analyze_match(args.limit, args.keyword_only)
+        since = int(args.new_since_minutes) if (args.report_only and args.only_new) else None
+        results, resume, mode, non_tech_jobs = analyze_match(
+            args.limit, args.keyword_only, tech_only=args.tech_only, since_minutes=since
+        )
         if not results:
             print("没有可分析的结果")
             sys.exit(1)
-        report, today = build_report(results, resume, mode)
+        report, today = build_report(results, resume, mode, non_tech_jobs)
         report = report.replace(f"# 简历-JD 匹配报告 · {today}", f"# 简历-JD 匹配报告 · {report_title}", 1)
         summary = f"共{len(results)}个岗位, Top1: {results[0][0]['job_title']}({results[0][1].get('match_score')}分)"
 
