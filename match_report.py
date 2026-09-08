@@ -758,48 +758,42 @@ def build_market_report(jobs, weak_jobs, noise_jobs, freq, cats):
         lines.append("*样本数据不足以统计薪资/经验/学历分布*")
         lines.append("")
 
-    lines.append("## 二、热门技能词 TOP 30")
-    lines.append("")
-    lines.append("| # | 技能 | 出现岗位数 | 占比 | 类别 |")
-    lines.append("|---|------|-----------|------|------|")
-    for i, (s, n) in enumerate(freq[:30], 1):
-        lines.append(f"| {i} | {s} | {n} | {n * 100 // max(total, 1)}% | {cats.get(s, '')} |")
-    lines.append("")
+    # 全部技能的JD原文要求(规则抽取, 后续可接LLM做智能归纳)
+    ctx = _skill_contexts(jobs, freq[:30], per_skill=99)
 
-    # Top10技能的JD原文要求摘录(规则抽取, 后续可接LLM做智能归纳)
-    ctx = _skill_contexts(jobs, freq[:10])
-    if ctx:
-        lines.append("## 三、TOP10 技能的 JD 原文要求摘录")
-        lines.append("")
-        lines.append("> 每个技能摘录 3 条 JD 原文（跨岗位去重），呈现招聘方对该技能的具体要求语境。")
-        lines.append("")
-        for skill, quotes in ctx.items():
-            lines.append(f"### {skill}")
-            lines.append("")
-            for sent, company, _jt in quotes:
-                lines.append(f"- 「{sent}」（{company}）")
-            lines.append("")
-        lines.append("")
+    lines.append("## 二、热门技能词 TOP 30（含 JD 原文要求，点击展开）")
+    lines.append("")
+    lines.append("| # | 技能 | 出现岗位数 | 占比 | 类别 | JD 原文要求 |")
+    lines.append("|---|------|-----------|------|------|-------------|")
+    for i, (s, n) in enumerate(freq[:30], 1):
+        quotes = ctx.get(s) or []
+        if quotes:
+            qtexts = "<br>".join(f"{qi}. {q}（{c}）" for qi, (q, c, _jt) in enumerate(quotes, 1))
+            jd_cell = f"<details><summary>展开{len(quotes)}条</summary>{qtexts}</details>"
+        else:
+            jd_cell = "—"
+        lines.append(f"| {i} | {s} | {n} | {n * 100 // max(total, 1)}% | {cats.get(s, '')} | {jd_cell} |")
+    lines.append("")
 
     by_cat = {}
     for s, n in freq:
         if n * 100 // max(total, 1) >= 20:  # 只列出现于≥20%岗位的
             by_cat.setdefault(cats.get(s, "其他"), []).append((s, n))
     if by_cat:
-        lines.append("## 四、分类视图(出现于≥20%岗位的技能)")
+        lines.append("## 三、分类视图(出现于≥20%岗位的技能)")
         lines.append("")
         for cat in sorted(by_cat, key=lambda c: -max(n for _, n in by_cat[c])):
             items = "、".join(f"**{s}**({n})" for s, n in sorted(by_cat[cat], key=lambda x: -x[1]))
             lines.append(f"- **{cat}**: {items}")
         lines.append("")
 
-    lines.append("## 五、岗位样本(应届/校招岗排最后, 其余按HR活跃度)")
+    lines.append("## 四、岗位样本(应届/校招岗排最后, 其余按HR活跃度)")
     lines.append("")
     lines.extend(_job_sample_lines(jobs))
     lines.append("")
 
     if weak_jobs:
-        lines.append("## 六、已剔除的弱相关岗位(标题不含关键词词根, 未参与统计)")
+        lines.append("## 五、已剔除的弱相关岗位(标题不含关键词词根, 未参与统计)")
         lines.append("")
         for i, j in enumerate(weak_jobs[:20], 1):
             title = j.get("job_title") or ""
@@ -811,7 +805,7 @@ def build_market_report(jobs, weak_jobs, noise_jobs, freq, cats):
         lines.append("")
 
     if noise_jobs:
-        lines.append("## 七、已过滤的疑似无关岗位(标题命中黑名单, 未参与统计)")
+        lines.append("## 六、已过滤的疑似无关岗位(标题命中黑名单, 未参与统计)")
         lines.append("")
         for i, j in enumerate(noise_jobs[:20], 1):
             title = j.get("job_title") or ""
