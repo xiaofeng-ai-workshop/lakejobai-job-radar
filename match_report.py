@@ -432,7 +432,10 @@ def _is_relevant(title: str, kws) -> bool:
     """
     MODIFIERS = ("ai", "人工智能", "智能")
     # 常见等价变体: 命中任一即算词根出现
-    VARIANTS = {"项目经理": ("项目经理", "项目管理", "项目主管"), "产品经理": ("产品经理", "产品管理")}
+    VARIANTS = {
+        "项目经理": ("项目经理", "项目管理", "项目主管", "项目助理"),
+        "产品经理": ("产品经理", "产品管理"),
+    }
 
     def _hit(core: str, title: str) -> bool:
         for k, vs in VARIANTS.items():
