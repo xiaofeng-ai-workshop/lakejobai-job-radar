@@ -71,11 +71,15 @@ $ lakejob conversations
 ```bash
 git clone https://github.com/lake121380-source/lakejobai-job-radar.git
 cd lakejobai-job-radar
-pip install -e .              # 含 CLI 入口 lakejob
-playwright install firefox    # 浏览器自动化
+pip install -e .
+playwright install firefox
 ```
 
-> Windows 平台若 `playwright install` 失败，参阅[诊断与排障](#-诊断与排障)。
+> `pip install -e .` 会同时安装 CLI 入口 `lakejob`；`playwright install firefox` 安装浏览器自动化内核。
+> **Windows 用户注意**：cmd/PowerShell 不支持 `#` 行内注释，请勿照抄带注释的命令，分条执行即可。
+> 若 `playwright install` 失败，参阅[诊断与排障](#-诊断与排障)。
+
+新手请先读 **[📖 使用指南（新手向）](docs/使用指南.md)**：从安装、扫码登录到「指定城市+岗位采集 JD → 匹配度报告」的完整图文流程，以及常见报错的解法。
 
 ---
 
