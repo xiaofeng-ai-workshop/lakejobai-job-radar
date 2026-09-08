@@ -244,9 +244,11 @@ def _resolve_city_code(name: str) -> str:
 # ── 采集 ──────────────────────────────────────────────
 
 def collect(keywords, cities, per_query, max_total, headless, refresh):
-    """搜索 + 详情采集, 结果入库。每个 城市×关键词 组合各采 per_query 条。"""
+    """搜索 + 详情采集, 结果入库。每个 城市×关键词 组合各采 per_query 条。
+    返回 (n_saved, search_urls): search_urls = [{'kw','city','url'}], 供报告记录采集方法。"""
     sc = BossScraper(headless=headless)
     sc.start()
+    search_urls = []
 
     # 登录态校验：Cookie 在持久化 profile 中(Web控制台扫码 / --login 均可),
     # 不依赖 STATE_FILE; 实际打开页面验证
@@ -279,6 +281,12 @@ def collect(keywords, cities, per_query, max_total, headless, refresh):
                 if _total_done():
                     break
                 print(f"\n[搜索] {kw} @ {city or '全国'} (目标 {per_query} 条)")
+                # 记录实际搜索URL(与 sc.search 内部拼接逻辑一致)
+                from urllib.parse import quote_plus as _qp
+                search_urls.append({
+                    "kw": kw, "city": city or "全国",
+                    "url": f"https://www.zhipin.com/web/geek/job?query={_qp(kw)}&city={city_code}",
+                })
                 try:
                     jobs = sc.search(kw, city_code)
                 except Exception as e:
@@ -321,7 +329,7 @@ def collect(keywords, cities, per_query, max_total, headless, refresh):
         print(f"\n[采集完成] 新增/刷新 {n_saved} 条")
     finally:
         sc.close()
-    return n_saved
+    return n_saved, search_urls
 
 
 # ── 分析 ──────────────────────────────────────────────
@@ -737,12 +745,13 @@ def main():
         set_setting("resume_summary", text[:3000])
         print(f"[OK] 已导入简历({len(text)}字, 截取前3000字)到 resume_summary")
 
+    search_urls = []
     if not args.report_only:
         kws = [k.strip() for k in args.keywords.split(",") if k.strip()]
         cities = [c.strip() for c in args.city.split(",") if c.strip()] or ["武汉"]
         n_combo = len(cities) * len(kws)
         print(f"[计划] {n_combo} 个组合 × 每个{args.per_query}条, 预计约 {n_combo * args.per_query * 4 // 60 + 1} 分钟")
-        collect(kws, cities, args.per_query, args.max_total, args.headless, args.refresh)
+        _, search_urls = collect(kws, cities, args.per_query, args.max_total, args.headless, args.refresh)
         pause(1, 2)
 
     market = args.market or not _has_resume()
@@ -754,12 +763,28 @@ def main():
     y, m, d = date.today().strftime("%Y-%m-%d").split("-")
     report_title = f"{y}年{m}月{d}日-{kw_part}（{city_part}）"
 
+    # 采集方法章节: 记录每次实际搜索的URL, BOSS召回的相关岗位可溯源
+    method_lines = ["## 采集方法", ""]
+    if search_urls:
+        for su in search_urls:
+            method_lines.append(f"- 关键词「{su['kw']}」@ {su['city']}：[{su['url']}]({su['url']})")
+        method_lines.append("")
+        method_lines.append(
+            "> 搜索词直接交给 BOSS 直聘搜索引擎做相关性召回（非标题精确匹配），"
+            "结果会包含平台认为相关的岗位（如产品经理/售前/总经理类）；"
+            "报告已按黑名单过滤明显无关岗位，弱相关岗位保留在样本中、可在上方岗位样本列表复核。"
+        )
+    else:
+        method_lines.append(f"- 本次为 --report-only 模式（未重新采集），报告基于库中已有数据，关键词：{'、'.join(kws_used)}")
+    method_lines.append("")
+
     if market:
         if not args.market:
             print("[提示] 未检测到有效简历, 自动进入市场模式(仅统计JD热词); 导入简历后自动切换为匹配模式")
         jobs, noise_jobs, freq, cats = analyze_market(args.limit, kws_used)
         report, today = build_market_report(jobs, noise_jobs, freq, cats)
         report = report.replace(f"# 市场热词报告 · {today}", f"# 市场热词报告 · {report_title}", 1)
+        report = report.replace("## 一、市场画像", "\n".join(method_lines) + "## 一、市场画像", 1)
         summary = (
             f"有效{len(jobs)}个岗位(过滤噪音{len(noise_jobs)}个)"
             + (f", 热词TOP1: {freq[0][0]}({freq[0][1]}个岗位)" if freq else "")
