@@ -102,7 +102,7 @@ def _resolve_city_code(name: str) -> str:
 
 # ── 采集 ──────────────────────────────────────────────
 
-def collect(keywords, city, max_jobs, headless, refresh):
+def collect(keywords, cities, max_jobs, headless, refresh):
     """搜索 + 详情采集, 结果入库。返回本次新增/刷新条数。"""
     if not STATE_FILE.exists():
         print("未检测到登录态, 请先运行: python boss_firefox.py --login")
@@ -112,17 +112,20 @@ def collect(keywords, city, max_jobs, headless, refresh):
     sc.start()
     n_saved = 0
     try:
-        city_code = _resolve_city_code(city)
         seen = set()
-        for kw in keywords:
+        for city in cities:
             if n_saved >= max_jobs:
                 break
-            print(f"\n[搜索] {kw} @ {city or '全国'}")
-            try:
-                jobs = sc.search(kw, city_code)
-            except Exception as e:
-                print(f"  搜索失败: {e}")
-                continue
+            city_code = _resolve_city_code(city)
+            for kw in keywords:
+                if n_saved >= max_jobs:
+                    break
+                print(f"\n[搜索] {kw} @ {city or '全国'}")
+                try:
+                    jobs = sc.search(kw, city_code)
+                except Exception as e:
+                    print(f"  搜索失败: {e}")
+                    continue
             for j in jobs:
                 if n_saved >= max_jobs:
                     break
@@ -236,20 +239,50 @@ def _keyword_score(job, resume):
     }
 
 
-def analyze(limit, keyword_only):
-    """取库中含JD的岗位 → 打分 → 排序。"""
-    resume = (get_setting("resume_summary") or "").strip()
-    if len(resume) <= 5:
-        print("简历摘要为空! 请先在Web控制台设置页填写, 或用 --resume-file 导入")
-        sys.exit(1)
+def _has_resume() -> bool:
+    """resume_summary 是否为有效简历（排除短文本/空模板占位）。"""
+    r = (get_setting("resume_summary") or "").strip()
+    return len(r) >= 60
 
+
+def _fetch_jobs_with_jd(limit):
     rows = get_db().execute(
         """SELECT * FROM applications
            WHERE description IS NOT NULL AND length(description) > 50
            ORDER BY id DESC LIMIT ?""",
         (limit,),
     ).fetchall()
-    jobs = [dict(r) for r in rows]
+    return [dict(r) for r in rows]
+
+
+def analyze_market(limit):
+    """市场模式：不比对简历，统计 JD 中的技能词频（市场需求热词）。"""
+    jobs = _fetch_jobs_with_jd(limit)
+    if not jobs:
+        print("库中没有含JD全文的岗位, 请先采集(--keywords ...)")
+        sys.exit(1)
+    freq = Counter()
+    cats = {}  # 技能小写 -> 类别
+    for job in jobs:
+        text = (job.get("description") or "") + " " + (job.get("job_title") or "")
+        found = set()
+        for cat, ss in parse_skills(text).items():
+            for s in ss:
+                found.add(s.lower())
+                cats.setdefault(s.lower(), cat)
+        for s in found:
+            freq[s] += 1
+    print(f"[市场分析] {len(jobs)} 个岗位, 提取到 {len(freq)} 个技能词")
+    return jobs, freq.most_common(), cats
+
+
+def analyze_match(limit, keyword_only):
+    """匹配模式：与 resume_summary 比对打分排序。"""
+    resume = (get_setting("resume_summary") or "").strip()
+    if not _has_resume():
+        print("简历摘要无效(过短或为空模板)! 请用 --resume-file 导入, 或使用市场模式 --market")
+        sys.exit(1)
+    jobs = _fetch_jobs_with_jd(limit)
     if not jobs:
         print("库中没有含JD全文的岗位, 请先采集(--keywords ...) 或在Web控制台搜索扫描")
         sys.exit(1)
@@ -352,16 +385,54 @@ def build_report(results, resume, mode):
     return "\n".join(lines), today
 
 
+def build_market_report(jobs, freq, cats):
+    """市场模式报告：JD 热词统计，不涉及简历。"""
+    today = date.today().isoformat()
+    total = len(jobs)
+    lines = [f"# 市场热词报告 · {today}", ""]
+    lines.append(f"> 样本: **{total} 个岗位**(JD全文) · 提取技能词 **{len(freq)}** 个 · 市场模式(未导入简历, 仅统计市场需求)")
+    lines.append("")
+    lines.append("## 一、热门技能词 TOP 30")
+    lines.append("")
+    lines.append("| # | 技能 | 出现岗位数 | 占比 | 类别 |")
+    lines.append("|---|------|-----------|------|------|")
+    for i, (s, n) in enumerate(freq[:30], 1):
+        lines.append(f"| {i} | {s} | {n} | {n * 100 // total}% | {cats.get(s, '')} |")
+    lines.append("")
+
+    by_cat = {}
+    for s, n in freq:
+        if n * 100 // total >= 20:  # 只列出现于≥20%岗位的
+            by_cat.setdefault(cats.get(s, "其他"), []).append((s, n))
+    if by_cat:
+        lines.append("## 二、分类视图(出现于≥20%岗位的技能)")
+        lines.append("")
+        for cat in sorted(by_cat, key=lambda c: -max(n for _, n in by_cat[c])):
+            items = "、".join(f"**{s}**({n})" for s, n in sorted(by_cat[cat], key=lambda x: -x[1]))
+            lines.append(f"- **{cat}**: {items}")
+        lines.append("")
+
+    lines.append("## 三、岗位样本")
+    lines.append("")
+    for i, j in enumerate(jobs[:40], 1):
+        lines.append(f"{i}. {j['job_title']} · {j.get('company') or ''} · {j.get('salary') or ''}")
+    lines.append("")
+    lines.append("---")
+    lines.append(f"*生成于 {today} · 市场模式 · 后续用 --resume-file 导入简历后再次运行, 即自动切换为逐岗匹配排序*")
+    return "\n".join(lines), today
+
+
 def main():
     ap = argparse.ArgumentParser(description="简历-JD匹配报告")
     ap.add_argument("--keywords", help="搜索关键词, 逗号分隔, 如 \"AI Agent,Python开发\"")
-    ap.add_argument("--city", default="全国", help="城市名, 默认全国")
+    ap.add_argument("--city", default="全国", help="城市名, 逗号分隔可多个, 如 \"武汉,深圳,广州\"; 默认全国")
     ap.add_argument("--max-jobs", type=int, default=20, help="本次采集上限, 默认20")
     ap.add_argument("--headless", action="store_true", help="无头模式运行浏览器")
     ap.add_argument("--refresh", action="store_true", help="强制重新采集已有岗位的JD")
     ap.add_argument("--report-only", action="store_true", help="跳过采集, 只分析库中已有数据")
     ap.add_argument("--limit", type=int, default=50, help="分析最近N条(默认50)")
     ap.add_argument("--keyword-only", action="store_true", help="不调LLM, 只做关键词分析(零成本)")
+    ap.add_argument("--market", action="store_true", help="市场模式: 不比对简历, 只统计JD热词(无简历时自动进入)")
     ap.add_argument("--resume-file", help="从文本文件导入简历到设置页resume_summary")
     args = ap.parse_args()
 
@@ -382,20 +453,32 @@ def main():
             print("请指定 --keywords, 或使用 --report-only 分析已有数据")
             sys.exit(1)
         kws = [k.strip() for k in args.keywords.split(",") if k.strip()]
-        collect(kws, args.city, args.max_jobs, args.headless, args.refresh)
+        cities = [c.strip() for c in args.city.split(",") if c.strip()] or ["全国"]
+        collect(kws, cities, args.max_jobs, args.headless, args.refresh)
         pause(1, 2)
 
-    results, resume, mode = analyze(args.limit, args.keyword_only)
-    if not results:
-        print("没有可分析的结果")
-        sys.exit(1)
+    market = args.market or not _has_resume()
+    if market:
+        if not args.market:
+            print("[提示] 未检测到有效简历, 自动进入市场模式(仅统计JD热词); 导入简历后自动切换为匹配模式")
+        jobs, freq, cats = analyze_market(args.limit)
+        report, today = build_market_report(jobs, freq, cats)
+        out_name = f"市场热词报告_{today}.md"
+        summary = f"共{len(jobs)}个岗位" + (f", 热词TOP1: {freq[0][0]}({freq[0][1]}个岗位)" if freq else "")
+    else:
+        results, resume, mode = analyze_match(args.limit, args.keyword_only)
+        if not results:
+            print("没有可分析的结果")
+            sys.exit(1)
+        report, today = build_report(results, resume, mode)
+        out_name = f"匹配报告_{today}.md"
+        summary = f"共{len(results)}个岗位, Top1: {results[0][0]['job_title']}({results[0][1].get('match_score')}分)"
 
-    report, today = build_report(results, resume, mode)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out = OUTPUT_DIR / f"匹配报告_{today}.md"
+    out = OUTPUT_DIR / out_name
     out.write_text(report, encoding="utf-8")
     print(f"\n[完成] 报告已生成: {out}")
-    print(f"        共{len(results)}个岗位, Top1: {results[0][0]['job_title']}({results[0][1].get('match_score')}分)")
+    print(f"        {summary}")
 
 
 if __name__ == "__main__":
