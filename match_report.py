@@ -547,24 +547,32 @@ def _hr_sort_key(j):
 
 
 def _job_sample_lines(jobs, top=40):
-    """岗位样本行: HR活跃度排序 + JD全文折叠块(缩进到列表项内, 渲染为岗位的子内容)"""
+    """岗位样本行: HR活跃度排序 + 应届/校招标记 + JD全文折叠块(缩进到列表项内)"""
     out = []
     for i, j in enumerate(sorted(jobs, key=_hr_sort_key)[:top], 1):
         title = j["job_title"]
         url = (j.get("job_url") or "").strip()
         head = f"[{title}]({url})" if url else title
+        # 应届/校招标记: 标题或经验要求含相关词
+        text_probe = title + " " + (j.get("experience") or "")
+        tags = []
+        if any(w in text_probe for w in ("校招", "应届", "校方", "校园")):
+            tags.append("🎓应届/校招")
+        if tags:
+            head += "　**" + " ".join(tags) + "**"
         active = (j.get("hr_active_label") or "").strip() or "活跃度未知"
         out.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''} · HR:{active}")
         desc = (j.get("description") or "").strip()
         if desc:
-            # 3空格缩进 = 属于当前列表项; details块内部文本再缩进2格, 保证JD全文都在折叠块内
+            # 缩进宽度 = 序号位数 + 2 (如"1."→3格, "10."→4格), 保证嵌套进列表项
+            ind = " " * (len(str(i)) + 2)
             out.append("")
-            out.append("   <details><summary>展开JD全文（%d字）</summary>" % len(desc))
+            out.append(f"{ind}<details><summary>展开JD全文（{len(desc)}字）</summary>")
             out.append("")
             for ln in desc.splitlines():
-                out.append(("     " + ln).rstrip())
+                out.append((ind + "  " + ln).rstrip())
             out.append("")
-            out.append("   </details>")
+            out.append(f"{ind}</details>")
             out.append("")
     return out
 
