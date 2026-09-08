@@ -546,20 +546,23 @@ def _hr_sort_key(j):
     return (int(d), 0)
 
 
+def _is_campus_job(j) -> bool:
+    """应届/校招岗: 标题或经验要求含相关词"""
+    probe = (j.get("job_title") or "") + " " + (j.get("experience") or "")
+    return any(w in probe for w in ("校招", "应届", "校方", "校园"))
+
+
 def _job_sample_lines(jobs, top=40):
-    """岗位样本行: HR活跃度排序 + 应届/校招标记 + JD全文折叠块(缩进到列表项内)"""
+    """岗位样本行: 应届/校招岗排最后, 其余按HR活跃度; JD全文折叠块缩进到列表项内"""
+    ordered = sorted(jobs, key=_hr_sort_key)
+    ordered = [j for j in ordered if not _is_campus_job(j)] + [j for j in ordered if _is_campus_job(j)]
     out = []
-    for i, j in enumerate(sorted(jobs, key=_hr_sort_key)[:top], 1):
+    for i, j in enumerate(ordered[:top], 1):
         title = j["job_title"]
         url = (j.get("job_url") or "").strip()
         head = f"[{title}]({url})" if url else title
-        # 应届/校招标记: 标题或经验要求含相关词
-        text_probe = title + " " + (j.get("experience") or "")
-        tags = []
-        if any(w in text_probe for w in ("校招", "应届", "校方", "校园")):
-            tags.append("🎓应届/校招")
-        if tags:
-            head += "　**" + " ".join(tags) + "**"
+        if _is_campus_job(j):
+            head += "　**🎓应届/校招**"
         active = (j.get("hr_active_label") or "").strip() or "活跃度未知"
         out.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''} · HR:{active}")
         desc = (j.get("description") or "").strip()
@@ -688,7 +691,7 @@ def build_market_report(jobs, noise_jobs, freq, cats):
             lines.append(f"- **{cat}**: {items}")
         lines.append("")
 
-    lines.append("## 四、岗位样本(按HR活跃度排序, 可展开JD全文)")
+    lines.append("## 四、岗位样本(应届/校招岗排最后, 其余按HR活跃度)")
     lines.append("")
     lines.extend(_job_sample_lines(jobs))
     lines.append("")
