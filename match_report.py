@@ -757,8 +757,11 @@ def build_market_report(jobs, weak_jobs, noise_jobs, freq, cats):
     if weak_jobs:
         lines.append("## 五、已剔除的弱相关岗位(标题不含关键词词根, 未参与统计)")
         lines.append("")
-        for j in weak_jobs[:20]:
-            lines.append(f"- {j.get('job_title') or ''} · {j.get('company') or ''} · {j.get('salary') or ''}")
+        for i, j in enumerate(weak_jobs[:20], 1):
+            title = j.get("job_title") or ""
+            url = (j.get("job_url") or "").strip()
+            head = f"[{title}]({url})" if url else title
+            lines.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''}")
         lines.append("")
         lines.append("> 判定规则：岗位标题须包含搜索关键词的核心词根（去掉 AI/智能/人工智能 等修饰词），BOSS 相关性召回的其他岗位在此剔除。")
         lines.append("")
@@ -766,8 +769,11 @@ def build_market_report(jobs, weak_jobs, noise_jobs, freq, cats):
     if noise_jobs:
         lines.append("## 六、已过滤的疑似无关岗位(标题命中黑名单, 未参与统计)")
         lines.append("")
-        for j in noise_jobs[:20]:
-            lines.append(f"- {j.get('job_title') or ''} · {j.get('company') or ''} · {j.get('salary') or ''}")
+        for i, j in enumerate(noise_jobs[:20], 1):
+            title = j.get("job_title") or ""
+            url = (j.get("job_url") or "").strip()
+            head = f"[{title}]({url})" if url else title
+            lines.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''}")
         lines.append("")
         lines.append("> 黑名单默认: 销售/投资/合伙人/猎头/讲师/加盟/招商/渠道/保险/房产等; 可在 Web 设置页 `noise_filter_keywords` 追加自定义词(逗号分隔)。")
         lines.append("")
