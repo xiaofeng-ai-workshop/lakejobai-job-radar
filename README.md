@@ -79,7 +79,7 @@ playwright install firefox
 > **Windows 用户注意**：cmd/PowerShell 不支持 `#` 行内注释，请勿照抄带注释的命令，分条执行即可。
 > 若 `playwright install` 失败，参阅[诊断与排障](#-诊断与排障)。
 
-新手请先读 **[📖 使用指南（新手向）](docs/使用指南.md)**：从安装、扫码登录到「指定城市+岗位采集 JD → 匹配度报告」的完整图文流程，以及常见报错的解法。
+新手请先读 **[📖 使用指南（新手向）](docs/usage-guide.md)**：从安装、扫码登录到「指定城市+岗位采集 JD → 匹配度报告」的完整图文流程，以及常见报错的解法。
 
 ---
 
@@ -152,7 +152,7 @@ python match_report.py --report-only --keyword-only
 - 打分时简历摘要会发送至所配置的 AI 服务商，介意可使用 `--keyword-only` 模式（完全不调 AI）
 - 其他参数：`--limit`（分析最近 N 条，默认 500）、`--refresh`（强制重新采集已有岗位）
 
-> 新手请先读 **[📖 使用指南](docs/使用指南.md)**，含分步流程与 FAQ。
+> 新手请先读 **[📖 使用指南](docs/usage-guide.md)**，含分步流程与 FAQ。
 
 ---
 
