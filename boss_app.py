@@ -71,6 +71,7 @@ from boss_state import (
     is_in_shortlist,
 )
 from boss_replier import generate_greeting
+from core.analyze import analyze_single_jd
 
 # ── FastAPI 应用 ──
 app = FastAPI(title="BOSS直聘自动化控制台", version="1.0.0")
@@ -1538,6 +1539,8 @@ async def search_jobs(req: SearchRequest):
         for j in jobs:
             j["url"] = _normalize_job_url(j.get("url", ""))
             if j.get("url"):
+                # 记录"该岗位用哪个 kw 搜出来的", 报告层按 kw 隔离分析
+                j["search_kw"] = (req.keyword or "").strip()
                 existing = get_application_by_url(j["url"])
                 if existing:
                     # 若之前被关键词过滤为 filtered，现在不再匹配过滤条件 → 恢复为 pending
@@ -1667,11 +1670,22 @@ async def scan_current_page():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"扫描失败: {e}")
 
+    # 扫描当前BOSS搜索结果页面，URL 通常带 ?query=xxx, 把它当成 search_kw
+    # 抽不到(比如手动打开某个公司页)就空着, 后面报告层走反推兜底
+    page_kw = ""
+    try:
+        from urllib.parse import urlparse, parse_qs
+        qs = parse_qs(urlparse(automation.page.url or "").query)
+        page_kw = (qs.get("query") or [""])[0].strip()
+    except Exception:
+        pass
+
     saved_ids = []
     result_jobs = []
     for j in jobs:
         j["url"] = _normalize_job_url(j.get("url", ""))
         if j.get("url"):
+            j["search_kw"] = page_kw
             existing = get_application_by_url(j["url"])
             if existing:
                 updated = update_application_from_job(existing["id"], j) or existing
@@ -1735,72 +1749,12 @@ async def scan_and_apply(req: ScanAndApplyRequest = ScanAndApplyRequest()):
 
 @app.post("/api/jobs/analyze")
 async def analyze_jd(req: AnalyzeRequest):
-    """AI分析岗位JD，返回匹配度、关键技能、差距、建议。"""
+    """AI分析岗位JD，返回匹配度、关键技能、差距、建议。
+
+    逻辑已统一到 core.analyze.analyze_single_jd（单一真相源），此处仅做适配。
+    """
     resume = get_setting("resume_summary", "")
-    desc = req.description or ""
-    title = req.job_title or ""
-    company = req.company or ""
-
-    if resume and len(resume.strip()) > 5:
-        prompt = f"""你是求职辅导专家。分析以下岗位JD，对比求职者简历，输出JSON。
-
-## 求职者简历
-{resume}
-
-## 岗位信息
-- 公司: {company}
-- 职位: {title}
-- JD: {desc[:2000]}
-
-## 输出格式（严格JSON）
-{{
-  "match_score": 85,
-  "decision": "建议投递",
-  "key_skills": ["Python", "LangChain", "RAG"],
-  "gap": "缺少K8s部署经验",
-  "advice": "建议强调Agent开发经验，问对方技术栈",
-  "summary": "整体匹配度较高，注意补充部署相关经验",
-  "reasons": ["匹配理由1", "匹配理由2"],
-  "risks": ["风险点1"],
-  "suggested_questions": ["建议追问1"]
-}}"""
-    else:
-        prompt = f"""你是求职辅导专家。分析以下岗位JD，提取关键信息，输出JSON。
-
-## 岗位信息
-- 公司: {company}
-- 职位: {title}
-- JD: {desc[:2000]}
-
-## 输出格式（严格JSON）
-{{
-  "match_score": 70,
-  "decision": "可以尝试",
-  "key_skills": ["Python", "LangChain", "RAG"],
-  "gap": "",
-  "advice": "",
-  "summary": "该岗位的核心要求是...",
-  "reasons": ["理由1"],
-  "risks": ["风险1"],
-  "suggested_questions": ["追问1"]
-}}
-
-注意：match_score 基于 JD 难度和市场需求预估即可，不必对比简历。summary 用一两句总结这个岗位的核心要求。"""
-
-    try:
-        sys.path.insert(0, str(Path(__file__).parent / "interview"))
-        from llm_client import llm_chat_deepseek
-
-        raw = llm_chat_deepseek(
-            [{"role": "user", "content": prompt}],
-            system_prompt="你是求职辅导专家，输出严格JSON。",
-            temperature=0.3,
-        )
-        import json
-
-        return json.loads(raw.strip().strip("`").strip("json").strip())
-    except Exception as e:
-        return {"error": f"AI分析失败: {e}", "match_score": 0, "summary": "请检查AI配置"}
+    return analyze_single_jd(req.description or "", req.job_title or "", req.company or "", resume)
 
 
 @app.post("/api/jobs/optimize-resume")

@@ -21,7 +21,10 @@ def get_db() -> sqlite3.Connection:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         _local.conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         _local.conn.row_factory = sqlite3.Row
+        # WAL: 允许一个写者 + 多个并发读者互不阻塞(Web 常驻写、CLI/脚本读报告不互锁)
         _local.conn.execute("PRAGMA journal_mode=WAL")
+        # busy_timeout: 写冲突时短暂等待而非立即报 database is locked(P1 并发强化)
+        _local.conn.execute("PRAGMA busy_timeout=5000")
         _local.conn.execute("PRAGMA foreign_keys=ON")
     return _local.conn
 
@@ -44,6 +47,7 @@ def init_db():
             status TEXT DEFAULT 'pending',
             greeting_text TEXT,
             greeting_sent_at TIMESTAMP,
+            search_kw TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -143,6 +147,11 @@ def init_db():
     # CHANGES.md §1 §4: 公司去重 + HR 活跃度列
     try:
         db.execute("ALTER TABLE applications ADD COLUMN company_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # 采集阶段记录"该岗位用哪个搜索词召回", 供报告层按 kw 隔离分析
+    try:
+        db.execute("ALTER TABLE applications ADD COLUMN search_kw TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass
     try:
@@ -514,8 +523,8 @@ def add_application(job: dict) -> int:
         """INSERT OR IGNORE INTO applications
            (job_title, company, salary, job_url, city, experience, education,
             hr_name, hr_title, description,
-            company_id, brand_name, hr_active_label, hr_active_days)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            company_id, brand_name, hr_active_label, hr_active_days, search_kw)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             job.get("title", ""),
             job.get("company", ""),
@@ -531,6 +540,7 @@ def add_application(job: dict) -> int:
             job.get("brand_name", ""),
             job.get("hr_active_label", ""),
             hr_active_days,
+            (job.get("search_kw") or "").strip(),
         ),
     )
     db.commit()
@@ -588,6 +598,10 @@ def update_application_from_job(app_id: int, job: dict) -> Optional[dict]:
         days = -1
     assignments.append("hr_active_days=CASE WHEN ?>-1 THEN ? ELSE hr_active_days END")
     params.extend([days, days])
+    # search_kw: 与其他字段一致, 空值不覆盖旧值(避免"已知→未知"回退)
+    search_kw = (job.get("search_kw") or "").strip()
+    assignments.append("search_kw=CASE WHEN ?!='' THEN ? ELSE search_kw END")
+    params.extend([search_kw, search_kw])
     params.append(app_id)
 
     db = get_db()

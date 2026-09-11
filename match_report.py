@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-简历-JD 匹配报告生成器
-====================
+简历-JD 匹配报告生成器（编排层）
+==========================
 
-流程: 登录BOSS(复用 boss_firefox 登录态) -> 按关键词搜索 -> 逐个采集JD全文 -> 入库
-      -> 与 resume_summary 比对打分 -> 按匹配度排序输出 Markdown 报告 + 关键词缺口建议
+本文件只负责「采集 + 命令行编排」。分析/报告逻辑已下沉到 core：
+- 分析/过滤：core.analyze（analyze_market / analyze_match / 方向过滤 / 软件向 / 宽词展开）
+- 报告生成：core.report（build_report / build_market_report）
 
 用法(在项目根目录):
   # 0. 首次: 扫码登录(只需一次)
@@ -22,8 +23,9 @@
   # 只刷新关键词缺口(不调LLM, 零成本)
   python match_report.py --report-only --keyword-only
 
-  # 宽词搜(如"项目经理")推荐加 --tech-only, 排除建筑/制造/金融/政务等非软件 PM
-  python match_report.py --keywords "项目经理" --city 武汉 --tech-only
+  # 软件向过滤: 默认开启(无需加参数), 想看全部才加 --include-non-tech
+  python match_report.py --keywords "项目经理" --city 武汉           # 默认只统计软件/互联网 PM
+  python match_report.py --keywords "项目经理" --city 武汉 --include-non-tech   # 含建筑/制造/金融/政务 PM
 
   # 只看本次入库的岗位(默认近 60 分钟, 配合 --report-only 复盘单次采集)
   python match_report.py --report-only --only-new --new-since-minutes 60
@@ -31,18 +33,16 @@
 说明:
   - 有 DeepSeek API Key(设置页配置)时逐岗打分; 没有则自动降级为关键词覆盖率打分
   - LLM 结果缓存在 .boss_profile/match_cache.json, 简历变更后自动重新分析
+  - ⚠️ 本脚本仍直接开浏览器采集；与 Web 控制台共用同一 Firefox profile，互斥。
+    决策③：本脚本将于 P2 废弃，采集改走 `lakejob collect`（CLI 脚本模式 → Web API）。
 """
 
 import argparse
-import hashlib
 import json
-import random
-import re
 import sys
 import time
 import urllib.request
 import urllib.error
-from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -55,7 +55,6 @@ except Exception:
 
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "interview"))
 
 from boss_firefox import BossScraper, pause  # noqa: E402
 from boss_state import (  # noqa: E402
@@ -66,205 +65,20 @@ from boss_state import (  # noqa: E402
     get_application_by_url,
     update_application_from_job,
 )
-
-CACHE_FILE = ROOT / ".boss_profile" / "match_cache.json"
-
-
-# ── 技能词典 v2：全品类 + 词边界匹配 ──────────────────
-# 设计: 一套综合词典覆盖所有岗位族(管理/产品/技术/商务), 词频只计入JD中真实出现的词,
-# 所以采集什么岗位, 报告自然突出什么类别的词; 分类视图可以看出岗位偏管理还是偏技术。
-
-SKILL_MAP_V2 = {
-    "项目管理": {
-        "项目管理", "PMP", "PgMP", "PRINCE2", "敏捷", "Scrum", "看板", "Kanban",
-        "需求分析", "需求管理", "需求调研", "跨部门协作", "跨部门沟通", "跨团队协作",
-        "风险管控", "风险管理", "交付管理", "项目交付", "项目落地", "项目推进",
-        "干系人", "OKR", "KPI", "甘特图", "里程碑", "立项", "结项", "排期",
-        "资源协调", "进度管理", "变更管理", "项目集", "项目群", "WBS", "复盘",
-    },
-    "产品管理": {
-        "产品规划", "产品设计", "产品迭代", "产品生命周期", "用户研究", "用户体验",
-        "用户调研", "原型设计", "PRD", "MRD", "竞品分析", "竞品调研", "用户增长",
-        "用户画像", "MVP", "埋点", "A/B测试", "产品思维", "商业化", "变现",
-    },
-    "协作/办公工具": {
-        "Jira", "Confluence", "飞书", "钉钉", "企业微信", "Teambition", "TAPD",
-        "禅道", "Notion", "Axure", "Figma", "Visio", "Xmind", "Excel", "PPT",
-        "Office", "墨刀", "ProcessOn", "n8n", "Zapier",
-    },
-    "AI/大模型": {
-        "大模型", "LLM", "Agent", "智能体", "RAG", "微调", "SFT", "Prompt",
-        "提示词", "Function Calling", "Tool Calling", "Embedding", "AIGC",
-        "知识库", "智能客服", "数字人", "Copilot", "多模态", "LangChain",
-        "LangGraph", "Dify", "Coze", "MCP", "机器学习", "深度学习", "NLP",
-        "计算机视觉", "语音识别", "OCR", "ChatGPT", "DeepSeek",
-    },
-    "技术-开发": {
-        "Python", "Java", "Go", "Golang", "C++", "C#", "C语言", "PHP",
-        "TypeScript", "JavaScript", "Node.js", "React", "Vue", "FastAPI",
-        "Flask", "Django", "Spring", "微服务", "API", "爬虫", "自动化脚本", "SQL",
-    },
-    "技术-数据": {
-        "MySQL", "PostgreSQL", "Redis", "MongoDB", "Elasticsearch", "Kafka",
-        "数据分析", "数据治理", "数据可视化", "BI", "数仓", "数据仓库", "大数据",
-        "Hadoop", "Spark", "Flink", "Hive",
-    },
-    "技术-部署/架构": {
-        "Docker", "Kubernetes", "K8s", "Linux", "CI/CD", "Nginx", "GPU", "CUDA",
-        "架构设计", "系统设计", "高并发", "分布式",
-    },
-    "商务/行业": {
-        "售前", "解决方案", "方案编写", "商务谈判", "客户沟通", "客户成功", "大客户",
-        "B端", "G端", "C端", "政务", "国企", "央企", "医疗", "金融", "教育",
-        "制造", "工业", "能源", "汽车", "车载", "电商", "供应链", "SaaS",
-    },
-    "软技能/领导力": {
-        "团队管理", "人员管理", "目标管理", "沟通协调", "汇报", "演讲", "谈判",
-        "领导力", "执行力", "出差", "驻场", "文档编写", "逻辑思维", "抗压",
-    },
-}
-
-# 词边界匹配缓存(修复旧版 substring 匹配把 "c" 从任意英文单词里抠出来的 bug)
-_TERM_RE = {}
-
-
-def _term_hit(term: str, text: str) -> bool:
-    """ASCII 技能词用词边界匹配(防止单字母/短词误命中), 中文词用子串匹配。"""
-    if re.fullmatch(r"[A-Za-z0-9+#./ -]+", term):
-        if term not in _TERM_RE:
-            _TERM_RE[term] = re.compile(
-                r"(?<![A-Za-z0-9+#])" + re.escape(term) + r"(?![A-Za-z0-9+#])", re.I
-            )
-        return bool(_TERM_RE[term].search(text))
-    return term.lower() in text.lower()
-
-
-def parse_skills2(text: str) -> dict:
-    r = {}
-    for cat, skills in SKILL_MAP_V2.items():
-        hits = [s for s in skills if _term_hit(s, text)]
-        if hits:
-            r[cat] = hits
-    return r
-
-
-# ── 噪音过滤与结构化解析 ──────────────────────────────
-
-# 默认标题黑名单: 明显与求职方向无关的岗位(可通过 settings.noise_filter_keywords 追加)
-DEFAULT_NOISE_WORDS = (
-    "销售", "投资", "合伙人", "猎头", "讲师", "加盟", "招商", "渠道",
-    "保险", "房产", "中介", "客服", "催收", "地推",
+# 分析 / 报告逻辑统一到 core（单一真相源），本文件不再重复实现
+from core.analyze import (  # noqa: E402
+    analyze_market,
+    analyze_match,
+    expand_search_kws as _expand_search_kws,
+    all_search_kws as _all_search_kws,
+    _has_resume,
 )
+from core.report import build_report, build_market_report  # noqa: E402
 
-
-def _load_noise_words() -> list:
-    custom = (get_setting("noise_filter_keywords") or "").strip()
-    extra = [w.strip() for w in custom.split(",") if w.strip()]
-    return list(DEFAULT_NOISE_WORDS) + extra
-
-
-def _is_noise(title: str, noise_words) -> bool:
-    return any(w in (title or "") for w in noise_words)
-
-
-# 软件向领域词: 标题或JD含其中任一词, 才算"软件相关岗位"(--tech-only 开启时)
-TECH_WORDS = (
-    "软件", "互联网", "IT", "信息化", "数字化", "SaaS", "计算机",
-    "程序员", "开发", "算法", "大数据", "人工智能", "AI", "ai",
-    "系统集成", "智能", "数据", "系统", "App", "app", "平台",
-    "Java", "Python", "研发", "产品", "云计算", "云", "科技",
-)
-
-
-def _is_tech_job(j) -> bool:
-    """标题或JD文本含软件/互联网领域词 → 算软件向岗位。"""
-    probe = (j.get("job_title") or "") + " " + (j.get("description") or "")[:500]
-    return any(w in probe for w in TECH_WORDS)
-
-
-def _parse_salary_k(s: str):
-    """'23-29K·24薪' -> (23, 29); '361-461元/天'等日薪/异常格式 -> None"""
-    m = re.search(r"(\d+)-(\d+)K", s or "")
-    if m:
-        lo, hi = int(m.group(1)), int(m.group(2))
-        if 1 <= lo <= 200 and lo < hi <= 300:
-            return lo, hi
-    return None
-
-
-def _salary_stats(jobs):
-    """薪资统计: 可解析岗位数/中位数/分档分布"""
-    pairs = [(j, _parse_salary_k(j.get("salary") or "")) for j in jobs]
-    ok = [(j, p) for j, p in pairs if p]
-    if not ok:
-        return None
-    los = sorted(p[0] for _, p in ok)
-    his = sorted(p[1] for _, p in ok)
-    med = lambda a: a[len(a) // 2] if len(a) % 2 else (a[len(a) // 2 - 1] + a[len(a) // 2]) / 2
-    brackets = [("≤15K", 0, 15), ("15-25K", 15, 25), ("25-35K", 25, 35), (">35K", 35, 999)]
-    dist = {name: 0 for name, _, _ in brackets}
-    for _, (lo, hi) in ok:
-        mid = (lo + hi) / 2
-        for name, a, b in brackets:
-            if a <= mid < b or (name == ">35K" and mid >= 35):
-                dist[name] += 1
-                break
-    return {
-        "n": len(ok), "n_total": len(jobs),
-        "lo_med": med(los), "hi_med": med(his),
-        "dist": dist,
-    }
-
-
-def _dist_table(jobs, col, order=None):
-    """经验/学历等字段的分布统计"""
-    c = Counter((j.get(col) or "").strip() for j in jobs if (j.get(col) or "").strip())
-    if order:
-        items = [(k, c[k]) for k in order if k in c] + [(k, n) for k, n in c.most_common() if k not in order]
-    else:
-        items = c.most_common()
-    return items
-
-
-# ── 工具 ──────────────────────────────────────────────
 
 def _norm_url(u: str) -> str:
     return (u or "").split("?")[0].rstrip("/")
 
-
-def _cache_key(url: str, resume: str) -> str:
-    return hashlib.sha1((url + "|" + resume[:500]).encode("utf-8")).hexdigest()
-
-
-def _load_cache() -> dict:
-    try:
-        return json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _save_cache(cache: dict):
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
-
-
-def _resolve_city_code(name: str) -> str:
-    """城市名 -> BOSS city code, 失败回退全国。"""
-    name = (name or "").strip()
-    if not name or name in ("全国", "all"):
-        return "100010000"
-    try:
-        from boss_geo import resolve_city_code
-        code = resolve_city_code(name)
-        if code:
-            return code
-    except Exception:
-        pass
-    print(f"  [提示] 未识别城市「{name}」, 使用全国")
-    return "100010000"
-
-
-# ── 采集 ──────────────────────────────────────────────
 
 def _check_web_console_conflict(port: int = 8010):
     """采集前检查 Web 控制台是否正占用同一个 Firefox profile。
@@ -295,6 +109,22 @@ def _check_web_console_conflict(port: int = 8010):
     print("确认 Web 控制台浏览器已关后, 重新跑本命令。", file=sys.stderr)
     print("=" * 64, file=sys.stderr)
     sys.exit(1)
+
+
+def _resolve_city_code(name: str) -> str:
+    """城市名 -> BOSS city code, 失败回退全国。"""
+    name = (name or "").strip()
+    if not name or name in ("全国", "all"):
+        return "100010000"
+    try:
+        from boss_geo import resolve_city_code
+        code = resolve_city_code(name)
+        if code:
+            return code
+    except Exception:
+        pass
+    print(f"  [提示] 未识别城市「{name}」, 使用全国")
+    return "100010000"
 
 
 def collect(keywords, cities, per_query, max_total, headless, refresh):
@@ -341,6 +171,7 @@ def collect(keywords, cities, per_query, max_total, headless, refresh):
                 su = {
                     "kw": kw, "city": city or "全国",
                     "url": f"https://www.zhipin.com/web/geek/jobs?city={city_code}&query={_qp(kw)}",
+                    "ts": time.time(),  # 旧数据反推 search_kw 的唯一时间锚
                 }
                 search_urls.append(su)
                 try:
@@ -348,7 +179,9 @@ def collect(keywords, cities, per_query, max_total, headless, refresh):
                     history = _json.loads(get_setting("search_url_history") or "[]")
                 except Exception:
                     history = []
-                if su not in history:
+                # 历史里可能存在不带 ts 的老条目, 直接按 (kw, city, url) 判重
+                if not any(h.get("kw") == su["kw"] and h.get("city") == su["city"]
+                           and h.get("url") == su["url"] for h in history):
                     history.append(su)
                 set_setting("search_url_history", _json.dumps(history, ensure_ascii=False))
                 try:
@@ -383,6 +216,8 @@ def collect(keywords, cities, per_query, max_total, headless, refresh):
                             print(f"  详情失败: {e}")
                         pause(1.5, 3.0)
                     j["url"] = url
+                    # 记录"该岗位用哪个 kw 搜出来的", 报告层按 kw 隔离分析
+                    j["search_kw"] = kw
                     if existing:
                         update_application_from_job(existing["id"], j)
                     else:
@@ -398,615 +233,13 @@ def collect(keywords, cities, per_query, max_total, headless, refresh):
     return n_saved, search_urls
 
 
-# ── 分析 ──────────────────────────────────────────────
-
-def _llm_available() -> bool:
-    try:
-        from llm_client import _load_ai_config
-        cfg = _load_ai_config()
-        return bool(cfg.get("api_key"))
-    except Exception:
-        return False
-
-
-def _analyze_llm(job, resume, cache):
-    """单岗 LLM 打分, 带缓存。失败返回 None。"""
-    from llm_client import llm_chat_deepseek, parse_json_from_llm
-
-    key = _cache_key(job["job_url"], resume)
-    if key in cache:
-        return cache[key]
-
-    prompt = f"""你是求职辅导专家。分析以下岗位JD，对比求职者简历，输出JSON。
-
-## 求职者简历
-{resume[:2000]}
-
-## 岗位信息
-- 公司: {job.get('company','')}
-- 职位: {job.get('job_title','')}
-- 薪资: {job.get('salary','')}
-- JD: {(job.get('description') or '')[:2000]}
-
-## 输出格式（严格JSON，不要多余文字）
-{{
-  "match_score": 85,
-  "decision": "建议投递",
-  "key_skills": ["Python", "RAG"],
-  "gap": "缺少K8s部署经验",
-  "advice": "建议强调Agent开发经验",
-  "summary": "一两句总结"
-}}"""
-    try:
-        raw = llm_chat_deepseek(
-            [{"role": "user", "content": prompt}],
-            system_prompt="你是求职辅导专家，输出严格JSON。",
-            temperature=0.2,
-        )
-        data = parse_json_from_llm(raw)
-        if not data or "match_score" not in data:
-            return None
-        cache[key] = data
-        return data
-    except Exception as e:
-        print(f"  LLM分析失败({job.get('job_title','')[:20]}): {e}")
-        return None
-
-
-def _keyword_score(job, resume):
-    """无API Key时的降级打分: JD技能词 vs 简历文本覆盖率的粗估。"""
-    text = (job.get("description") or "") + " " + (job.get("job_title") or "")
-    skills = []
-    for _, ss in parse_skills2(text).items():
-        skills.extend(ss)
-    if not skills:
-        return None
-    r = (resume or "").lower()
-    have = [s for s in skills if _term_hit(s, r) or s.lower() in r]
-    score = int(round(40 + 60.0 * len(set(have)) / len(set(skills))))
-    return {
-        "match_score": score,
-        "decision": "建议投递" if score >= 75 else "可以尝试" if score >= 55 else "谨慎",
-        "key_skills": sorted(set(skills), key=lambda x: -len(x))[:8],
-        "gap": "、".join(sorted(set(skills) - set(have))[:6]),
-        "advice": "(关键词模式, 建议配置AI Key获得更准的分析)",
-        "summary": f"JD共识别{len(set(skills))}个技能词, 简历覆盖{len(set(have))}个",
-    }
-
-
-def _has_resume() -> bool:
-    """resume_summary 是否为有效简历（排除短文本/空模板占位）。"""
-    r = (get_setting("resume_summary") or "").strip()
-    return len(r) >= 60
-
-
-def _fetch_jobs_with_jd(limit, since_minutes=None):
-    """取含 JD 全文的岗位。since_minutes=N → 只取最近 N 分钟内入库(配合 --only-new)。"""
-    if since_minutes:
-        rows = get_db().execute(
-            """SELECT * FROM applications
-               WHERE description IS NOT NULL AND length(description) > 50
-                 AND created_at >= datetime('now', ?)
-               ORDER BY id DESC LIMIT ?""",
-            (f"-{int(since_minutes)} minutes", limit),
-        ).fetchall()
-    else:
-        rows = get_db().execute(
-            """SELECT * FROM applications
-               WHERE description IS NOT NULL AND length(description) > 50
-               ORDER BY id DESC LIMIT ?""",
-            (limit,),
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def _is_relevant(title: str, kws) -> bool:
-    """标题相关性: 搜索关键词的核心词根须出现在标题中。
-
-    规则: 把关键词按"AI/智能/人工智能"等修饰词拆出核心词根(如"AI项目经理"→"项目经理"),
-    标题至少包含一个核心词根(或其常见变体, 如"项目经理"≈"项目管理")才算相关。
-    """
-    MODIFIERS = ("ai", "人工智能", "智能")
-    # 常见等价变体: 命中任一即算词根出现
-    VARIANTS = {
-        "项目经理": ("项目经理", "项目管理", "项目主管", "项目助理"),
-        "产品经理": ("产品经理", "产品管理"),
-    }
-
-    def _hit(core: str, title: str) -> bool:
-        for k, vs in VARIANTS.items():
-            if k in core or core in k:
-                return any(v in title for v in vs)
-        return core in title
-
-    title = (title or "").lower()
-    for kw in kws:
-        core = kw.lower()
-        for m in MODIFIERS:
-            core = core.replace(m, "").strip()
-        if not core:
-            continue
-        for part in [p for p in re.split(r"[/\s]+", core) if len(p) >= 2]:
-            if _hit(part, title):
-                return True
-    return False
-
-
-def _split_jobs(jobs_all, kws):
-    """三路分流: 相关岗位 / 弱相关(标题不含关键词词根) / 噪音(黑名单)。
-    弱相关和噪音都不进统计, 在报告中单列可复核。"""
-    noise_words = _load_noise_words()
-    jobs, weak_jobs, noise_jobs = [], [], []
-    for j in jobs_all:
-        t = j.get("job_title") or ""
-        if _is_noise(t, noise_words):
-            noise_jobs.append(j)
-        elif not _is_relevant(t, kws):
-            weak_jobs.append(j)
-        else:
-            jobs.append(j)
-    return jobs, weak_jobs, noise_jobs
-
-
-def analyze_market(limit, kws=None, tech_only=False, since_minutes=None):
-    """市场模式：不比对简历。相关性过滤 + 噪音过滤 + 可选软件向过滤 + JD技能词频 + 薪资/经验/学历统计。
-
-    tech_only=True → 在相关性过滤后, 进一步用 _is_tech_job 排除非软件/互联网岗位,
-                     这些岗位进 non_tech_jobs 单独列出(可复核), 不参与统计。
-    since_minutes   → 只取最近 N 分钟入库(配合 --only-new)。
-    """
-    jobs_all = _fetch_jobs_with_jd(limit, since_minutes=since_minutes)
-    if not jobs_all:
-        print("库中没有含JD全文的岗位, 请先采集(--keywords ...)")
-        sys.exit(1)
-    kws = kws or ["项目经理"]
-    jobs, weak_jobs, noise_jobs = _split_jobs(jobs_all, kws)
-
-    non_tech_jobs = []
-    if tech_only:
-        kept, dropped = [], []
-        for j in jobs:
-            (kept if _is_tech_job(j) else dropped).append(j)
-        non_tech_jobs = dropped
-        jobs = kept
-        if not jobs:
-            print("[警告] tech_only 过滤后没有剩余岗位, 报告将几乎全空; 考虑去掉 --tech-only")
-
-    freq = Counter()
-    cats = {}  # 技能小写 -> 类别
-    for job in jobs:
-        text = (job.get("description") or "") + " " + (job.get("job_title") or "")
-        found = set()
-        for cat, ss in parse_skills2(text).items():
-            for s in ss:
-                found.add(s.lower())
-                cats.setdefault(s.lower(), cat)
-        for s in found:
-            freq[s] += 1
-    print(
-        f"[市场分析] 强相关{len(jobs)}个 · 剔除弱相关{len(weak_jobs)}个(标题不含关键词词根) · "
-        f"剔除噪音{len(noise_jobs)}个(标题黑名单)"
-        + (f" · 剔除非软件{len(non_tech_jobs)}个(--tech-only)" if tech_only else "")
-        + f" · 提取到 {len(freq)} 个技能词"
-    )
-    return jobs, weak_jobs, noise_jobs, non_tech_jobs, freq.most_common(), cats
-
-
-def analyze_match(limit, keyword_only, tech_only=False, since_minutes=None):
-    """匹配模式：与 resume_summary 比对打分排序。
-
-    tech_only=True → 在评分前先过滤掉非软件/互联网岗位(用 _is_tech_job),
-                     被过滤的进 non_tech_jobs 单独列出(报告里单节, 可复核)。
-    since_minutes   → 只取最近 N 分钟入库(配合 --only-new)。
-    """
-    resume = (get_setting("resume_summary") or "").strip()
-    if not _has_resume():
-        print("简历摘要无效(过短或为空模板)! 请用 --resume-file 导入, 或使用市场模式 --market")
-        sys.exit(1)
-    jobs = _fetch_jobs_with_jd(limit, since_minutes=since_minutes)
-    if not jobs:
-        print("库中没有含JD全文的岗位, 请先采集(--keywords ...) 或在Web控制台搜索扫描")
-        sys.exit(1)
-
-    non_tech_jobs = []
-    if tech_only:
-        kept, dropped = [], []
-        for j in jobs:
-            (kept if _is_tech_job(j) else dropped).append(j)
-        non_tech_jobs = dropped
-        jobs = kept
-        if not jobs:
-            print("[警告] tech_only 过滤后没有剩余岗位, 考虑去掉 --tech-only")
-
-    use_llm = (not keyword_only) and _llm_available()
-    mode = "LLM智能分析" if use_llm else "关键词覆盖分析(未配置AI Key或指定--keyword-only)"
-    scope = []
-    if since_minutes:
-        scope.append(f"近{int(since_minutes)}分钟入库")
-    if tech_only:
-        scope.append("软件向")
-    scope_str = f" · 范围: {'/'.join(scope)}" if scope else ""
-    print(f"[分析] {len(jobs)} 个岗位 · 模式: {mode}{scope_str}")
-
-    cache = _load_cache() if use_llm else {}
-    results, failed = [], 0
-    for i, job in enumerate(jobs, 1):
-        r = _analyze_llm(job, resume, cache) if use_llm else None
-        if r is None:
-            r = _keyword_score(job, resume)
-            if r is None:
-                failed += 1
-                continue
-        results.append((job, r))
-        print(f"  [{i}/{len(jobs)}] {r['match_score']}分 {job['job_title'][:25]}")
-    if use_llm:
-        _save_cache(cache)
-    if failed:
-        print(f"  [跳过] {failed} 个岗位无法解析")
-
-    results.sort(key=lambda x: -int(x[1].get("match_score") or 0))
-    return results, resume, mode, non_tech_jobs
-
-
-# ── 关键词缺口聚合 ────────────────────────────────────
-
-def keyword_gap(results, resume):
-    """统计所有JD中的技能词频次, 区分简历已覆盖/缺失。"""
-    r = (resume or "").lower()
-    have, miss = Counter(), Counter()
-    for job, _ in results:
-        text = (job.get("description") or "") + " " + (job.get("job_title") or "")
-        found = set()
-        for _, ss in parse_skills2(text).items():
-            for s in ss:
-                found.add(s.lower())
-        for s in found:
-            (have if (_term_hit(s, r) or s in r) else miss)[s] += 1
-    return have, miss
-
-
-def _skill_contexts(jobs, top_skills, per_skill=3):
-    """Top技能在JD中的原文要求摘录: 抽含该技能词的句子, 按公司分组(组内去重)。
-
-    返回 {skill: [(company, [sent, ...]), ...]} —— 每个公司一个组, 组内是该公司的相关句子,
-    便于对比不同公司对同一技能的要求差异。
-    """
-    result = {}
-    for skill, _n in top_skills:
-        by_company = {}
-        for j in jobs:
-            company = (j.get("company") or "未知公司").strip()
-            sents = []
-            seen = set()
-            text = (j.get("description") or "") + "\n" + (j.get("job_title") or "")
-            for sent in re.split(r"[。；;！？\n]", text):
-                sent = sent.strip()
-                if not (8 <= len(sent) <= 100):
-                    continue
-                if not _term_hit(skill, sent):
-                    continue
-                key = sent[:30]
-                if key in seen:
-                    continue
-                seen.add(key)
-                sents.append(sent)
-            if sents:
-                # 同名公司(不同岗位)合并
-                if company in by_company:
-                    by_company[company].extend(sents)
-                else:
-                    by_company[company] = sents
-        groups = list(by_company.items())
-        if per_skill and sum(len(s) for _, s in groups) > per_skill:
-            # 限量模式: 按公司顺序截断
-            kept, total = [], 0
-            for c, sents in groups:
-                if total >= per_skill:
-                    break
-                kept.append((c, sents))
-                total += len(sents)
-            groups = kept
-        if groups:
-            result[skill] = groups
-    return result
-
-
-# ── 报告 ──────────────────────────────────────────────
-
-def _market_sections(jobs):
-    """薪资/经验/学历市场统计(市场报告与匹配报告共用)。返回 md 行列表, 三级标题。"""
-    out = []
-    s = _salary_stats(jobs)
-    if s:
-        out.append("### 薪资分析")
-        out.append("")
-        out.append(
-            f"可解析薪资的岗位 **{s['n']}/{s['n_total']}** · 区间中位数: "
-            f"**下限 {s['lo_med']:g}K / 上限 {s['hi_med']:g}K**"
-        )
-        out.append("")
-        out.append("| 薪资档(取区间中点) | 岗位数 | 占比 |")
-        out.append("|---|---|---|")
-        for name, n in s["dist"].items():
-            out.append(f"| {name} | {n} | {n * 100 // max(s['n'], 1)}% |")
-        out.append("")
-    exp = _dist_table(jobs, "experience", order=["经验不限", "应届", "1年内", "1-3年", "3-5年", "5-10年", "10年以上"])
-    edu = _dist_table(jobs, "education", order=["学历不限", "大专", "本科", "硕士", "博士"])
-    if exp or edu:
-        out.append("### 经验 / 学历要求分布")
-        out.append("")
-        if exp:
-            ne = sum(n for _, n in exp)
-            out.append(f"经验要求（{ne}/{len(jobs)} 个岗位标注了该项）：")
-            out.append("")
-            out.append("| 经验要求 | 岗位数 | 占比 |")
-            out.append("|---|---|---|")
-            for k, n in exp:
-                out.append(f"| {k} | {n} | {n * 100 // ne}% |")
-            out.append("")
-        if edu:
-            nd = sum(n for _, n in edu)
-            out.append(f"学历要求（{nd}/{len(jobs)} 个岗位标注了该项）：")
-            out.append("")
-            out.append("| 学历要求 | 岗位数 | 占比 |")
-            out.append("|---|---|---|")
-            for k, n in edu:
-                out.append(f"| {k} | {n} | {n * 100 // nd}% |")
-            out.append("")
-    return out
-
-
-def _hr_sort_key(j):
-    d = j.get("hr_active_days")
-    if d is None or d == "" or d == -1:
-        return (999, 0)
-    return (int(d), 0)
-
-
-def _is_campus_job(j) -> bool:
-    """应届/校招岗: 标题或经验要求含相关词"""
-    probe = (j.get("job_title") or "") + " " + (j.get("experience") or "")
-    return any(w in probe for w in ("校招", "应届", "校方", "校园"))
-
-
-def _job_sample_lines(jobs, top=None):
-    """岗位样本行: 应届/校招岗排最后, 其余按HR活跃度; JD全文折叠块缩进到列表项内。
-
-    top=None → 显示全部进入统计的岗位(默认行为, 不再丢岗位);
-    top=N   → 报告过大时手动限前 N 个。
-    """
-    ordered = sorted(jobs, key=_hr_sort_key)
-    ordered = [j for j in ordered if not _is_campus_job(j)] + [j for j in ordered if _is_campus_job(j)]
-    if top is not None:
-        ordered = ordered[:top]
-    out = []
-    for i, j in enumerate(ordered[:top], 1):
-        title = j["job_title"]
-        url = (j.get("job_url") or "").strip()
-        head = f"[{title}]({url})" if url else title
-        if _is_campus_job(j):
-            head += "　**🎓应届/校招**"
-        active = (j.get("hr_active_label") or "").strip() or "活跃度未知"
-        out.append(f"{i}. {head} · **{j.get('company') or ''}** · {j.get('salary') or ''} · HR:{active}")
-        desc = (j.get("description") or "").strip()
-        if desc:
-            # 缩进宽度 = 序号位数 + 2 (如"1."→3格, "10."→4格), 保证嵌套进列表项
-            ind = " " * (len(str(i)) + 2)
-            out.append("")
-            out.append(f"{ind}<details><summary>展开JD全文（{len(desc)}字）</summary>")
-            out.append("")
-            for ln in desc.splitlines():
-                out.append((ind + "  " + ln).rstrip())
-            out.append("")
-            out.append(f"{ind}</details>")
-            out.append("")
-    return out
-
-
-def build_report(results, resume, mode, non_tech_jobs=None):
-    today = date.today().isoformat()
-    scores = [int(r.get("match_score") or 0) for _, r in results]
-    lines = [f"# 简历-JD 匹配报告 · {today}", ""]
-    non_tech_jobs = non_tech_jobs or []
-    extra = " · 软件向" if (results and _is_tech_job(results[0][0])) and False else ""  # 头部由 main 的 suffix 控制, 这里不强加
-    scope_note = ""
-    # 若 --tech-only 且存在过滤, 头部明确
-    if non_tech_jobs:
-        scope_note = f" · 剔除非软件 {len(non_tech_jobs)} 个(--tech-only)"
-    lines.append(f"> 分析模式: **{mode}** · 岗位数: **{len(results)}** · 平均分: **{sum(scores)//max(len(scores),1)}**{scope_note}")
-    lines.append(f"> 简历摘要(前100字): {resume[:100]}...")
-    lines.append("")
-    lines.append("## 一、匹配度排名(高→低)")
-    lines.append("")
-    lines.append("| # | 分数 | 结论 | 岗位 | 公司 | 薪资 | 主要差距 |")
-    lines.append("|---|------|------|------|------|------|----------|")
-    for i, (job, r) in enumerate(results, 1):
-        gap = (r.get("gap") or "-").replace("|", "/")[:40]
-        lines.append(
-            f"| {i} | {r.get('match_score','-')} | {r.get('decision','')} "
-            f"| {job['job_title'][:24]} | {(job.get('company') or '')[:14]} "
-            f"| {job.get('salary') or ''} | {gap} |"
-        )
-    lines.append("")
-    # 市场背景: 薪资/经验/学历分布 + 高匹配岗位薪资对比
-    jobs_only = [j for j, _ in results]
-    ms = _market_sections(jobs_only)
-    if ms:
-        lines.append("## 二、市场背景（薪资 / 经验 / 学历）")
-        lines.append("")
-        lines.extend(ms)
-        strong = [j for j, r in results if int(r.get("match_score") or 0) >= 70]
-        s_all = _salary_stats(jobs_only)
-        s_strong = _salary_stats(strong) if strong else None
-        if s_all and s_strong:
-            lines.append(
-                f"> 💡 与你匹配度≥70分的 {len(strong)} 个岗位薪资中位数为 "
-                f"**{s_strong['lo_med']:g}-{s_strong['hi_med']:g}K**, 全部样本为 "
-                f"**{s_all['lo_med']:g}-{s_all['hi_med']:g}K** —— 前者可视为\"你目前够得着的薪资带\"。"
-            )
-            lines.append("")
-    lines.append("## 三、岗位详情")
-    lines.append("")
-    for i, (job, r) in enumerate(results, 1):
-        lines.append(f"### {i}. {job['job_title']} · {job.get('company') or ''} ({r.get('match_score','-')}分)")
-        lines.append(f"- **结论**: {r.get('decision','')} — {r.get('summary','')}")
-        if r.get("key_skills"):
-            lines.append(f"- **关键技能**: {', '.join(r['key_skills'])}")
-        if r.get("gap"):
-            lines.append(f"- **差距**: {r['gap']}")
-        if r.get("advice"):
-            lines.append(f"- **建议**: {r['advice']}")
-        if job.get("job_url"):
-            lines.append(f"- 链接: {job['job_url']}")
-        lines.append("")
-
-    have, miss = keyword_gap(results, resume)
-    lines.append("## 四、关键词缺口分析(全部JD统计)")
-    lines.append("")
-    if have:
-        lines.append("**简历已覆盖**(招聘方要求且你已具备):")
-        lines.append("")
-        for s, n in have.most_common(15):
-            lines.append(f"- {s} ({n}个岗位)")
-        lines.append("")
-    if miss:
-        lines.append("**建议补充**(JD高频出现但简历未提及 —— 写进简历技能/项目经历可提升匹配度):")
-        lines.append("")
-        for s, n in miss.most_common(25):
-            p = "🔴" if n >= 10 else "🟡" if n >= 5 else "🟢"
-            lines.append(f"- {p} **{s}** ({n}个岗位)")
-        lines.append("")
-
-    if non_tech_jobs:
-        lines.append("## 五、已过滤的非软件岗位(--tech-only, 未参与打分) · 全部列出")
-        lines.append("")
-        for i, j in enumerate(non_tech_jobs, 1):
-            title = j.get("job_title") or ""
-            url = (j.get("job_url") or "").strip()
-            head = f"[{title}]({url})" if url else title
-            lines.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''}")
-        lines.append("")
-        lines.append("> 判定规则：标题或 JD 前 500 字命中 软件/互联网/IT/信息化/数字化/SaaS/AI/系统集成/研发/产品/云计算/科技 等领域词才算软件向。")
-        lines.append("> 搜『项目经理』『产品经理』等宽词时强烈推荐加 `--tech-only`，避免被建筑/制造/金融/政务等行业的 PM 岗稀释打分。")
-        lines.append("")
-        lines.append("---")
-    else:
-        lines.append("---")
-    lines.append(f"*生成于 {today} · lakejobai-job-radar match_report.py · 前提: 简历内容真实, 不建议堆砌未掌握的关键词*")
-    return "\n".join(lines), today
-
-
-def build_market_report(jobs, weak_jobs, noise_jobs, non_tech_jobs, freq, cats):
-    """市场模式报告：市场画像（薪资/经验/学历 + 热词 + 分类 + 样本 + 剔除清单），不涉及简历。
-
-    所有"剔除/过滤"清单均完整展示(不截断), 方便用户复核。
-    """
-    today = date.today().isoformat()
-    total = len(jobs)
-    lines = [f"# 市场热词报告 · {today}", ""]
-    has_non_tech = bool(non_tech_jobs)
-    extra = " · 软件向" if has_non_tech else ""
-    lines.append(
-        f"> 强相关样本: **{total} 个岗位**(JD全文) · 剔除弱相关 **{len(weak_jobs)}** 个(标题不含关键词词根) · "
-        f"剔除噪音 **{len(noise_jobs)}** 个(标题黑名单)"
-        + (f" · 剔除非软件 **{len(non_tech_jobs)}** 个(--tech-only)" if has_non_tech else "")
-        + f" · 提取技能词 **{len(freq)}** 个 · 市场模式(未导入简历, 仅统计市场需求){extra}"
-    )
-    lines.append("")
-    lines.append("## 一、市场画像（薪资 / 经验 / 学历）")
-    lines.append("")
-    ms = _market_sections(jobs)
-    if ms:
-        lines.extend(ms)
-    else:
-        lines.append("*样本数据不足以统计薪资/经验/学历分布*")
-        lines.append("")
-
-    # 全部技能的JD原文要求(按公司分组, 后续可接LLM做智能归纳)
-    ctx = _skill_contexts(jobs, freq[:30], per_skill=0)
-
-    lines.append("## 二、热门技能词 TOP 30（含 JD 原文要求，按公司分组，点击展开）")
-    lines.append("")
-    lines.append("| # | 技能 | 出现岗位数 | 占比 | 类别 | JD 原文要求 |")
-    lines.append("|---|------|-----------|------|------|-------------|")
-    for i, (s, n) in enumerate(freq[:30], 1):
-        groups = ctx.get(s) or []
-        if groups:
-            n_all = sum(len(sents) for _, sents in groups)
-            parts = []
-            for gi, (c, sents) in enumerate(groups):
-                items = "".join(f"<br>{qi}. {sent}" for qi, sent in enumerate(sents, 1))
-                # 公司标题前也换行(第一组除外, 其后与上一组隔开), 标题后接第一句前有<br>
-                lead = "<br>" if gi > 0 else ""
-                parts.append(f"{lead}<b>【{c}】</b>{items}")
-            jd_cell = f"<details><summary>展开 {len(groups)} 家公司 / {n_all} 条</summary>" + "".join(parts) + "</details>"
-        else:
-            jd_cell = "—"
-        lines.append(f"| {i} | {s} | {n} | {n * 100 // max(total, 1)}% | {cats.get(s, '')} | {jd_cell} |")
-    lines.append("")
-
-    by_cat = {}
-    for s, n in freq:
-        if n * 100 // max(total, 1) >= 20:  # 只列出现于≥20%岗位的
-            by_cat.setdefault(cats.get(s, "其他"), []).append((s, n))
-    if by_cat:
-        lines.append("## 三、分类视图(出现于≥20%岗位的技能)")
-        lines.append("")
-        for cat in sorted(by_cat, key=lambda c: -max(n for _, n in by_cat[c])):
-            items = "、".join(f"**{s}**({n})" for s, n in sorted(by_cat[cat], key=lambda x: -x[1]))
-            lines.append(f"- **{cat}**: {items}")
-        lines.append("")
-
-    lines.append("## 四、岗位样本(应届/校招岗排最后, 其余按HR活跃度)")
-    lines.append("")
-    lines.extend(_job_sample_lines(jobs))
-    lines.append("")
-
-    if weak_jobs:
-        lines.append("## 五、已剔除的弱相关岗位(标题不含关键词词根, 未参与统计) · 全部列出")
-        lines.append("")
-        for i, j in enumerate(weak_jobs, 1):
-            title = j.get("job_title") or ""
-            url = (j.get("job_url") or "").strip()
-            head = f"[{title}]({url})" if url else title
-            lines.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''}")
-        lines.append("")
-        lines.append("> 判定规则：岗位标题须包含搜索关键词的核心词根（去掉 AI/智能/人工智能 等修饰词），BOSS 相关性召回的其他岗位在此剔除。")
-        lines.append("")
-
-    if noise_jobs:
-        lines.append("## 六、已过滤的疑似无关岗位(标题命中黑名单, 未参与统计) · 全部列出")
-        lines.append("")
-        for i, j in enumerate(noise_jobs, 1):
-            title = j.get("job_title") or ""
-            url = (j.get("job_url") or "").strip()
-            head = f"[{title}]({url})" if url else title
-            lines.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''}")
-        lines.append("")
-        lines.append("> 黑名单默认: 销售/投资/合伙人/猎头/讲师/加盟/招商/渠道/保险/房产等; 可在 Web 设置页 `noise_filter_keywords` 追加自定义词(逗号分隔)。")
-        lines.append("")
-
-    if non_tech_jobs:
-        lines.append("## 七、已过滤的非软件岗位(--tech-only, 未参与统计) · 全部列出")
-        lines.append("")
-        for i, j in enumerate(non_tech_jobs, 1):
-            title = j.get("job_title") or ""
-            url = (j.get("job_url") or "").strip()
-            head = f"[{title}]({url})" if url else title
-            lines.append(f"{i}. {head} · {j.get('company') or ''} · {j.get('salary') or ''}")
-        lines.append("")
-        lines.append("> 判定规则：标题或 JD 前 500 字命中 软件/互联网/IT/信息化/数字化/SaaS/AI/系统集成/研发/产品/云计算/科技 等领域词才算软件向。")
-        lines.append("> 搜『项目经理』『产品经理』等宽词时强烈推荐加 `--tech-only`，避免被建筑/制造/金融/政务等行业的 PM 岗稀释统计。")
-        lines.append("")
-
-    lines.append("---")
-    lines.append(f"*生成于 {today} · 市场模式 · 后续用 --resume-file 导入简历后再次运行, 即自动切换为逐岗匹配排序*")
-    return "\n".join(lines), today
-
-
 def main():
     ap = argparse.ArgumentParser(description="简历-JD匹配报告")
     ap.add_argument("--keywords", default="AI项目经理", help="搜索关键词, 逗号分隔可多个; 默认 AI项目经理")
+    ap.add_argument("--search-kw", default=None,
+                    help="报告的分析方向(决定拉哪些 search_kw 的岗位). "
+                         "默认从 --keywords 第一个取值; 显式传 'none' 表示不隔离(分析所有岗位). "
+                         "宽词自动包含窄词, 例如 项目经理 ⊃ AI项目经理(反向不成立).")
     ap.add_argument("--city", default="武汉", help="城市名, 逗号分隔可多个, 如 \"武汉,深圳,广州\"; 默认武汉")
     ap.add_argument("--per-query", type=int, default=20, help="每个 城市×关键词 组合采集条数(默认20)")
     ap.add_argument("--max-total", type=int, default=50, help="全局采集上限(默认50, 0=不限)")
@@ -1017,10 +250,9 @@ def main():
     ap.add_argument("--keyword-only", action="store_true", help="不调LLM, 只做关键词分析(零成本)")
     ap.add_argument("--market", action="store_true", help="市场模式: 不比对简历, 只统计JD热词(无简历时自动进入)")
     ap.add_argument("--resume-file", help="从文本文件导入简历到设置页resume_summary")
-    ap.add_argument("--tech-only", action=argparse.BooleanOptionalAction, default=True,
-                    help="只保留软件/互联网领域岗位(标题或JD前500字含 软件/IT/SaaS/AI/研发/产品 等); "
-                         "其余单列'已过滤的非软件岗位'可复核. 搜『项目经理』『产品经理』等宽词时强烈推荐. "
-                         "默认开启; 用 --no-tech-only 关闭.")
+    ap.add_argument("--include-non-tech", action="store_true",
+                    help="把非软件/互联网岗位(建筑/制造/金融/政务等)也纳入统计. "
+                         "**默认只统计软件向岗位, 无需加任何参数**; 加此开关才会包含全部.")
     ap.add_argument("--only-new", action="store_true",
                     help="只分析最近 --new-since-minutes 分钟内入库的岗位(配合 --report-only 复盘单次采集结果).")
     ap.add_argument("--new-since-minutes", type=int, default=60,
@@ -1052,11 +284,25 @@ def main():
     # 报告文件名: xx年xx月xx日-xx岗位（xx城市）.md, 输出到项目 reports/ 目录
     kws_used = [k.strip() for k in (args.keywords or "AI项目经理").split(",") if k.strip()]
     cities_used = [c.strip() for c in (args.city or "武汉").split(",") if c.strip()] or ["武汉"]
-    kw_part = "+".join(kws_used)[:30]
+    # 软件向过滤默认开启(无需参数), 加 --include-non-tech 才关掉
+    tech_only = not args.include_non_tech
+    # 单 kw 报告隔离: 默认取 --keywords 第一个; 显式 'none' 表示不隔离
+    if args.search_kw is None:
+        search_kw_iso = kws_used[0] if kws_used else None
+    elif args.search_kw.lower() == "none":
+        search_kw_iso = None
+    else:
+        search_kw_iso = args.search_kw.strip()
+    # 宽词 ⊃ 窄词: 展开出本次报告应纳入的 search_kw 集合(如 项目经理 ⊃ AI项目经理)
+    search_kws_iso = _expand_search_kws(search_kw_iso, _all_search_kws()) if search_kw_iso else None
+    if search_kws_iso and len(search_kws_iso) > 1:
+        print(f"[范围] 「{search_kw_iso}」为宽词, 纳入 {sorted(search_kws_iso)} 的岗位")
+    # 文件名: 隔离模式下只用该 kw, 不用 + 连接, 避免误导
+    kw_part = search_kw_iso if search_kw_iso else "+".join(kws_used)[:30]
     city_part = "+".join(cities_used)[:20]
     y, m, d = date.today().strftime("%Y-%m-%d").split("-")
     suffix_parts = []
-    if args.tech_only:
+    if tech_only:
         suffix_parts.append("软件向")
     scope_label = None
     if args.report_only and args.only_new:
@@ -1094,42 +340,38 @@ def main():
         if not args.market:
             print("[提示] 未检测到有效简历, 自动进入市场模式(仅统计JD热词); 导入简历后自动切换为匹配模式")
         since = int(args.new_since_minutes) if (args.report_only and args.only_new) else None
-        jobs, weak_jobs, noise_jobs, non_tech_jobs, freq, cats = analyze_market(
-            args.limit, kws_used, tech_only=args.tech_only, since_minutes=since
+        jobs, weak_jobs, noise_jobs, dir_weak_jobs, non_tech_jobs, freq, cats = analyze_market(
+            args.limit, kws_used, tech_only=tech_only, since_minutes=since,
+            search_kws=search_kws_iso, direction=search_kw_iso,
         )
-        report, today = build_market_report(jobs, weak_jobs, noise_jobs, non_tech_jobs, freq, cats)
+        report, today = build_market_report(jobs, weak_jobs, noise_jobs, dir_weak_jobs, non_tech_jobs, freq, cats)
         report = report.replace(f"# 市场热词报告 · {today}", f"# 市场热词报告 · {report_title}", 1)
         report = report.replace("## 一、市场画像", "\n".join(method_lines) + "## 一、市场画像", 1)
         summary = (
-            f"强相关{len(jobs)}个岗位(剔除弱相关{len(weak_jobs)}个、噪音{len(noise_jobs)}个"
+            f"强相关{len(jobs)}个岗位(剔除弱相关{len(weak_jobs)}个、方向不符{len(dir_weak_jobs)}个、噪音{len(noise_jobs)}个"
             + (f"、非软件{len(non_tech_jobs)}个" if non_tech_jobs else "")
             + ")"
             + (f", 热词TOP1: {freq[0][0]}({freq[0][1]}个岗位)" if freq else "")
         )
     else:
         since = int(args.new_since_minutes) if (args.report_only and args.only_new) else None
-        results, resume, mode, non_tech_jobs = analyze_match(
-            args.limit, args.keyword_only, tech_only=args.tech_only, since_minutes=since
+        results, resume, mode, non_tech_jobs, dir_weak_jobs = analyze_match(
+            args.limit, args.keyword_only, tech_only=tech_only, since_minutes=since,
+            search_kws=search_kws_iso, direction=search_kw_iso,
         )
         if not results:
             print("没有可分析的结果")
             sys.exit(1)
-        report, today = build_report(results, resume, mode, non_tech_jobs)
+        report, today = build_report(results, resume, mode, non_tech_jobs, dir_weak_jobs)
         report = report.replace(f"# 简历-JD 匹配报告 · {today}", f"# 简历-JD 匹配报告 · {report_title}", 1)
         summary = f"共{len(results)}个岗位, Top1: {results[0][0]['job_title']}({results[0][1].get('match_score')}分)"
 
-    # 输出到项目 reports/ 目录; 同名文件(同日同岗位同城市)则追加合并
+    # 输出到项目 reports/ 目录; 同名文件直接覆盖(不追加)
     out_dir = ROOT / "reports"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{report_title}.md"
-    if out.exists():
-        with open(out, "a", encoding="utf-8") as f:
-            f.write(f"\n\n---\n\n<!-- 追加于 {date.today().strftime('%Y-%m-%d %H:%M')} -->\n\n")
-            f.write(report)
-        print(f"\n[完成] 报告已合并追加到: {out}")
-    else:
-        out.write_text(report, encoding="utf-8")
-        print(f"\n[完成] 报告已生成: {out}")
+    out.write_text(report, encoding="utf-8")
+    print(f"\n[完成] 报告已生成(覆盖写): {out}")
     print(f"        {summary}")
 
 

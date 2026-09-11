@@ -140,10 +140,37 @@ python match_report.py --report-only
 python match_report.py --report-only --keyword-only
 ```
 
-报告输出到项目 `reports/` 目录，文件名格式 `xx年xx月xx日-xx岗位（xx城市）.md`（同名自动合并追加）：
+报告输出到项目 `reports/` 目录，文件名格式 `xx年xx月xx日-xx岗位（xx城市）.md`：
 
 - **市场热词报告**（无简历时）：热门技能 TOP30（岗位数+占比+类别）、分类视图、岗位样本
 - **匹配报告**（导入简历后）：① 匹配度排名表（分数/结论/岗位/公司/薪资/差距）② 每岗位详情（关键技能、差距、投递建议、岗位链接）③ 关键词缺口分析 — JD 高频出现但简历未提及的技能，按频次排序（🔴≥10 / 🟡≥5 / 🟢）
+
+### search_kw：岗位归属隔离
+
+每条入库岗位都记下**它是用哪个关键词搜出来的**（`applications.search_kw`），出报告时按该字段隔离——**一份报告只分析自己那个 kw 的岗位**。库里同时存了 `AI项目经理` / `项目经理` / `AI测试` / `FDE` 等多个方向时不隔离，统计和打分会被别的方向稀释。
+
+**宽词包含窄词（方向性，不可反向）**：一个 JD 可能被多个 kw 命中，`AI项目经理` 的 JD 同时也满足「项目经理」的语义，反过来不成立。所以跑宽词时会自动把窄词的 JD 纳入：
+
+| 跑这个 kw | 纳入的 search_kw 池 |
+|---|---|
+| `项目经理` | `项目经理` + `AI项目经理` |
+| `AI项目经理` | `AI项目经理`（不倒吞宽词） |
+| `AI测试` / `FDE` | 各自独立（平行词互不交叉） |
+
+```bash
+# 推荐: 一个 kw 一份报告(软件向过滤默认开启, 无需加参数)
+python match_report.py --report-only --market --keywords "FDE"
+python match_report.py --report-only --market --keywords "AI测试"
+
+# --search-kw 显式指定分析方向(none = 关隔离, 分析全库)
+python match_report.py --report-only --keywords "AI项目经理" --search-kw "项目经理"
+
+# --include-non-tech 把建筑/制造/金融/政务等非软件岗也纳入(默认已过滤)
+python match_report.py --report-only --market --keywords "项目经理" --include-non-tech
+```
+
+> 同名报告**直接覆盖**，重跑即得最新结果。
+> 存量数据 `search_kw` 为空或归类错时，用一次性脚本按标题重归类：`python scripts/refine_search_kw.py`（预览）/ 加 `--apply` 写库。
 
 说明：
 
@@ -264,6 +291,7 @@ $ lakejob scan-apply --max-pages 5
 | 🏛 法人识别 + 法人直聘标签 | ✅ | — |
 | 🧠 AI JD 分析（匹配度+技能+差距+决策+风险） | ✅ | ✅ |
 | 📊 简历-JD 批量匹配报告（采集+排序+关键词缺口） | — | ✅ |
+| 🏷 search_kw 岗位归属隔离（多方向数据互不污染） | ✅ | ✅ |
 | 📋 AI 简历优化（24h 缓存 + 项目改写） | ✅ | — |
 | 💬 AI 沟通建议（24h 缓存 + 话题方向） | ✅ | — |
 | 🤖 AI 自动回复（多平台模型） | ✅ | — |
@@ -359,6 +387,8 @@ $ lakejob scan-apply --max-pages 5
 ├── boss_replier.py          # AI 回复 + 招呼语 + 简历优化上下文
 ├── boss_state.py            # SQLite 数据持久化
 ├── match_report.py          # 简历-JD 匹配报告（采集+分析+关键词缺口）
+├── scripts/                 # 一次性维护脚本（存量数据清洗等）
+│   └── refine_search_kw.py  #   按标题重写 search_kw, 修正岗位归属错位
 ├── pyproject.toml           # 打包 + CLI 入口
 ├── lakejob_cli/             # CLI (18 命令)
 │   ├── cli.py / client.py / output.py / schema.json
@@ -478,6 +508,7 @@ lakejob status             # 浏览器运行状态
 | AI 不回复 | 检查设置页 AI Key 是否保存 / Base URL 是否可访问 |
 | HR 要简历无法自动点击 | `send_resume` 已改用 `innerText` 精确匹配 + 多重兜底 |
 | 投递全部被跳过 | 检查公司去重/HR 不活跃过滤是否过严 |
+| 报告里混进别的岗位的 JD | 老数据 `search_kw` 归类错，跑 `python scripts/refine_search_kw.py --apply` 后删旧报告重跑 |
 | 重复发同一家公司 | 自动去重已开启，仍出现请检查公司名是否被规范化 |
 
 </details>
@@ -506,7 +537,7 @@ lakejob status             # 浏览器运行状态
 
 启动时自动建表（`ALTER TABLE` 兼容旧库）：
 
-- `applications` — 投递记录（含 `hr_active` / `hr_active_label` / `hr_active_days` / `company_id` / `company_size` / `industry` / `legal_rep` / `is_boss` / `area_district` / `business_district` / `optimize_result` / `optimize_at` / `chat_suggestion_result` / `chat_suggestion_at`）
+- `applications` — 投递记录（含 `search_kw` 入库关键词 / `hr_active` / `hr_active_label` / `hr_active_days` / `company_id` / `company_size` / `industry` / `legal_rep` / `is_boss` / `area_district` / `business_district` / `optimize_result` / `optimize_at` / `chat_suggestion_result` / `chat_suggestion_at`）
 - `conversations` — HR 会话（含 `hr_wechat` / `wechat_shared_at` / `interest_level`）
 - `messages` — 聊天消息
 - `companies` — 公司信息缓存（24h 复用）

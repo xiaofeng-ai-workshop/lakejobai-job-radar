@@ -5,28 +5,71 @@
   "server": "http://127.0.0.1:8010",
   "commands": [
     {
+      "name": "version",
+      "description": "查看版本号。",
+      "cli": "lakejob version",
+      "endpoint": "",
+      "params": {},
+      "capability_key": "",
+      "status": "active"
+    },
+    {
+      "name": "schema",
+      "description": "输出工具描述（供 AI Agent 调用）。",
+      "cli": "lakejob schema",
+      "endpoint": "",
+      "params": {},
+      "capability_key": "",
+      "status": "active"
+    },
+    {
       "name": "search",
       "description": "搜索BOSS直聘岗位。返回岗位列表含薪资/公司/城市/经验要求等。",
-      "cli": "lakejob search <keyword> --city <城市> [--welfare <福利>] [--count <数量>]（city为空则用设置中的默认城市）",
+      "cli": "lakejob search <keyword> --city <城市> [--welfare <福利>] [--count <数量>]",
       "endpoint": "POST /api/jobs/search",
       "params": {
-        "keyword": { "type": "string", "required": true, "description": "搜索关键词如 AI Agent / Golang 等" },
-        "city": { "type": "string", "required": false, "description": "城市名如 北京/广州/全国，不传则用 default_city 设置" },
-        "welfare": { "type": "string", "required": false, "description": "福利筛选 逗号分隔 如 双休,五险一金" },
-        "limit": { "type": "integer", "required": false, "default": 60, "description": "返回数量上限" }
-      }
+        "keyword": {
+          "type": "string",
+          "required": true,
+          "description": "搜索关键词如 AI Agent / Golang 等"
+        },
+        "city": {
+          "type": "string",
+          "required": false,
+          "description": "城市名如 北京/广州/全国，不传则用 default_city 设置"
+        },
+        "welfare": {
+          "type": "string",
+          "required": false,
+          "description": "福利筛选 逗号分隔 如 双休,五险一金"
+        },
+        "count": {
+          "type": "integer",
+          "required": false,
+          "default": 60,
+          "description": "返回数量上限"
+        }
+      },
+      "capability_key": "collect",
+      "status": "active"
     },
     {
       "name": "status",
       "description": "查看浏览器状态和今日统计。",
       "cli": "lakejob status",
-      "endpoint": "GET /api/status"
+      "endpoint": "GET /api/status",
+      "params": {},
+      "capability_key": "system",
+      "status": "active"
     },
     {
       "name": "stats",
       "description": "投递转化漏斗统计：搜索→待投递→已投递→HR回复→面试。",
       "cli": "lakejob stats",
-      "endpoint": "GET /api/stats"
+      "endpoint": "GET /api/stats",
+      "params": {},
+      "capability_key": "auto_apply",
+      "status": "active"
     },
     {
       "name": "jobs",
@@ -34,9 +77,24 @@
       "cli": "lakejob jobs [--status pending|applied|replied] [--limit 50]",
       "endpoint": "GET /api/jobs",
       "params": {
-        "status": { "type": "string", "required": false, "enum": ["pending", "applied", "replied"], "description": "岗位状态筛选" },
-        "limit": { "type": "integer", "required": false, "default": 50 }
-      }
+        "status": {
+          "type": "string",
+          "required": false,
+          "enum": [
+            "pending",
+            "applied",
+            "replied"
+          ],
+          "description": "岗位状态筛选"
+        },
+        "limit": {
+          "type": "integer",
+          "required": false,
+          "default": 50
+        }
+      },
+      "capability_key": "collect",
+      "status": "active"
     },
     {
       "name": "apply",
@@ -44,32 +102,50 @@
       "cli": "lakejob apply <job_url>",
       "endpoint": "POST /api/jobs/apply",
       "params": {
-        "job_url": { "type": "string", "required": true, "description": "岗位URL" }
-      }
+        "job_url": {
+          "type": "string",
+          "required": true,
+          "description": "岗位URL"
+        }
+      },
+      "capability_key": "auto_apply",
+      "status": "active"
     },
     {
       "name": "apply-batch",
       "description": "批量投递待投递岗位。",
       "cli": "lakejob apply-batch [--status pending]",
-      "endpoint": "POST /api/jobs/apply-batch"
+      "endpoint": "POST /api/jobs/apply-batch",
+      "params": {},
+      "capability_key": "auto_apply",
+      "status": "active"
     },
     {
       "name": "scan",
       "description": "扫描当前BOSS搜索结果页，提取所有可见岗位保存到数据库。用于手动调筛后捕获过滤结果。",
       "cli": "lakejob scan",
-      "endpoint": "POST /api/jobs/scan"
+      "endpoint": "POST /api/jobs/scan",
+      "params": {},
+      "capability_key": "collect",
+      "status": "active"
     },
     {
       "name": "scan-apply",
       "description": "扫描当前页面全部岗位 → 一键批量投递。相当于 scan + apply-batch 合一步完成。",
       "cli": "lakejob scan-apply",
-      "endpoint": "POST /api/jobs/scan-and-apply"
+      "endpoint": "POST /api/jobs/scan-and-apply",
+      "params": {},
+      "capability_key": "auto_apply",
+      "status": "active"
     },
     {
       "name": "conversations",
       "description": "列出所有HR会话。",
       "cli": "lakejob conversations",
-      "endpoint": "GET /api/conversations"
+      "endpoint": "GET /api/conversations",
+      "params": {},
+      "capability_key": "chat_auto_reply",
+      "status": "active"
     },
     {
       "name": "chat",
@@ -77,8 +153,14 @@
       "cli": "lakejob chat <conv_id>",
       "endpoint": "GET /api/conversations/{conv_id}/messages",
       "params": {
-        "conv_id": { "type": "integer", "required": true, "description": "会话ID" }
-      }
+        "conv_id": {
+          "type": "integer",
+          "required": true,
+          "description": "会话ID"
+        }
+      },
+      "capability_key": "chat_auto_reply",
+      "status": "active"
     },
     {
       "name": "send",
@@ -86,52 +168,172 @@
       "cli": "lakejob send <conv_id> --msg <消息内容>",
       "endpoint": "POST /api/conversations/{conv_id}/send",
       "params": {
-        "conv_id": { "type": "integer", "required": true },
-        "msg": { "type": "string", "required": true, "description": "消息内容" }
-      }
+        "conv_id": {
+          "type": "integer",
+          "required": true
+        },
+        "msg": {
+          "type": "string",
+          "required": true,
+          "description": "消息内容"
+        }
+      },
+      "capability_key": "chat_auto_reply",
+      "status": "active"
     },
     {
       "name": "doctor",
       "description": "诊断环境：Python版本、浏览器状态、登录态、AI配置等。",
       "cli": "lakejob doctor",
-      "endpoint": "GET /api/doctor"
+      "endpoint": "GET /api/doctor",
+      "params": {},
+      "capability_key": "system",
+      "status": "active"
     },
     {
       "name": "login",
       "description": "重新扫码登录BOSS直聘。",
       "cli": "lakejob login",
-      "endpoint": "POST /api/system/relogin"
+      "endpoint": "POST /api/system/relogin",
+      "params": {},
+      "capability_key": "system",
+      "status": "active"
+    },
+    {
+      "name": "analyze",
+      "description": "AI 分析单个岗位与简历的匹配度。",
+      "cli": "lakejob analyze <job_url> [--title <名称>] [--company <公司>] [--desc <JD>]",
+      "endpoint": "POST /api/jobs/analyze",
+      "params": {
+        "job_url": {
+          "type": "string",
+          "required": true,
+          "description": "岗位URL"
+        },
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "岗位名称"
+        },
+        "company": {
+          "type": "string",
+          "required": false,
+          "description": "公司名"
+        },
+        "desc": {
+          "type": "string",
+          "required": false,
+          "description": "JD描述"
+        }
+      },
+      "capability_key": "match_analyze",
+      "status": "active"
+    },
+    {
+      "name": "shortlist",
+      "description": "候选池管理：list / add / remove。",
+      "cli": "lakejob shortlist <list|add|remove> [--job-url <URL>] [--title <名称>] [--company <公司>] [--id <ID>]",
+      "endpoint": "GET /api/shortlists",
+      "params": {
+        "action": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "list",
+            "add",
+            "remove"
+          ]
+        },
+        "job_url": {
+          "type": "string",
+          "required": false,
+          "description": "岗位URL"
+        },
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "岗位名称"
+        },
+        "company": {
+          "type": "string",
+          "required": false,
+          "description": "公司名"
+        },
+        "id": {
+          "type": "integer",
+          "required": false,
+          "description": "shortlist ID"
+        }
+      },
+      "capability_key": "shortlist",
+      "status": "active"
     },
     {
       "name": "server",
       "description": "管理后台服务（启动/停止/状态）。",
-      "cli": "lakejob server [--start|--stop] [--port 8010]"
+      "cli": "lakejob server [--start|--stop] [--port 8010]",
+      "endpoint": "",
+      "params": {
+        "start": {
+          "type": "boolean",
+          "required": false
+        },
+        "stop": {
+          "type": "boolean",
+          "required": false
+        },
+        "port": {
+          "type": "integer",
+          "required": false,
+          "default": 8010
+        }
+      },
+      "capability_key": "system",
+      "status": "active"
     },
     {
-      "name": "company-preview",
-      "description": "拉取公司画像：在招岗位数 + 全部岗位 + 全部 HR（带职务）+ 挑出的职务最高 HR。两种模式：keyword（跨公司聚合选最热）或 company/company_id（单公司）。",
-      "cli": "lakejob smart-send --keyword <关键词> [--city <城市>]  或  lakejob smart-send --company <公司名> [--company-id <id>]",
-      "endpoint": "GET /api/companies/preview",
+      "name": "restart",
+      "description": "杀旧进程并重启后台服务。",
+      "cli": "lakejob restart [--port 8010]",
+      "endpoint": "",
       "params": {
-        "keyword": { "type": "string", "required": false, "description": "搜索关键词；和 company 二选一" },
-        "city": { "type": "string", "required": false },
-        "company": { "type": "string", "required": false, "description": "单公司模式直接指定公司名" },
-        "company_id": { "type": "string", "required": false, "description": "BOSS 32位 hex 的 companyId" }
-      }
+        "port": {
+          "type": "integer",
+          "required": false,
+          "default": 8010
+        }
+      },
+      "capability_key": "system",
+      "status": "active"
     },
     {
       "name": "smart-send",
-      "description": "智能投递：先预览公司画像挑出职务最高的 HR，再发招呼语 + 投递到该 HR 的岗位。默认会等用户 y/N 确认，加 --yes 跳过。",
+      "description": "智能投递：搜索→按公司分组→挑最高HR→批量投递（死链，P3 下架）。",
       "cli": "lakejob smart-send --keyword <关键词> [--city <城市>] [--greeting <招呼语>] [--yes]",
       "endpoint": "POST /api/companies/smart-send",
       "params": {
-        "keyword": { "type": "string", "required": false },
-        "city": { "type": "string", "required": false },
-        "company": { "type": "string", "required": false },
-        "company_id": { "type": "string", "required": false },
-        "greeting": { "type": "string", "required": false, "description": "留空自动生成，会把 top_hr 称呼带进招呼语" },
-        "yes": { "type": "boolean", "required": false, "default": false, "description": "跳过 y/N 确认直接投递" }
-      }
+        "keyword": {
+          "type": "string",
+          "required": false
+        },
+        "city": {
+          "type": "string",
+          "required": false
+        },
+        "greeting": {
+          "type": "string",
+          "required": false,
+          "description": "自定义招呼语"
+        },
+        "yes": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "跳过确认直接投递"
+        }
+      },
+      "capability_key": "smart_send",
+      "status": "dead_link"
     }
   ],
   "output_format": {
@@ -145,5 +347,5 @@
       "hints": "object - 后续操作提示"
     }
   },
-  "agent_instructions": "当用户要求搜索职位、投递岗位、查看聊天等BOSS直聘操作时：1. 先运行 lakejob status 检查状态 2. 如需登录运行 lakejob login 3. 根据意图调用对应命令 4. 解析返回JSON中的 ok 字段判断成败。推荐工作流：search → 用户手动在BOSS调筛 → scan → scan-apply（或 apply-batch）。如果用户说『按公司聚合选最热公司 + 挑最高职级 HR 再投递』，用 smart-send：先传 keyword/city 走跨公司模式，或传 company/company-id 走单公司模式。"
+  "agent_instructions": "当用户要求搜索职位、投递岗位、查看聊天等BOSS直聘操作时：1. 先运行 lakejob status 检查状态；2. 如需登录运行 lakejob login；3. 根据意图调用对应命令；4. 解析返回JSON中的 ok 字段判断成败。推荐工作流：search → 用户手动在BOSS调筛 → scan → scan-apply（或 apply-batch）。"
 }

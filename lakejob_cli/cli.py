@@ -7,6 +7,10 @@ import click
 
 from . import client, output
 
+# schema 由能力注册表（唯一真相源 core/capabilities.py）生成，不再手搓
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.capabilities import generate_schema_dict
+
 
 @click.group()
 def main():
@@ -25,9 +29,8 @@ def version_cmd():
 # ── Schema：AI Agent 工具描述 ──
 @main.command("schema")
 def schema_cmd():
-    path = __file__.replace("cli.py", "schema.json")
-    with open(path, encoding="utf-8") as f:
-        schema = json.load(f)
+    # schema 由 core/capabilities.py（唯一真相源）实时生成
+    schema = generate_schema_dict(include_dead=True)
     output.emit(output.ok("schema", data=schema))
 
 
