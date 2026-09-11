@@ -4,7 +4,11 @@ import os
 from typing import Optional
 import httpx
 
-BASE_URL = os.environ.get("LAKEJOB_API", "http://127.0.0.1:8010")
+# 配置统一（ADR-0002）：运行时基址优先级 env(启动注入) > settings 表 > 默认。
+# 不再直接读 env，避免「CLI 读 env、Web 读表」两边不一致。
+from core.config import get_runtime_base_url  # noqa: E402
+
+BASE_URL = get_runtime_base_url()
 
 
 def _post(path: str, json=None, timeout=120):
@@ -56,6 +60,15 @@ def scan():
 
 def scan_and_apply():
     return _post("/api/jobs/scan-and-apply", timeout=300)
+
+
+def fetch_details(job_urls=None, mode: str = "empty", limit: int = 200):
+    """补齐岗位 JD 全文。job_urls 非空只采指定 URL；否则 mode=empty 补齐库中 JD 为空的岗位。"""
+    return _post(
+        "/api/jobs/fetch-details",
+        {"urls": list(job_urls or []), "mode": mode, "limit": limit},
+        timeout=600,
+    )
 
 
 def conversations():

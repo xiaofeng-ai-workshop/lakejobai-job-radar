@@ -46,14 +46,16 @@ def test_capability_matrix_derivable():
 
 
 # ── 命令注册表 / schema 生成 ──
-def test_command_count_is_20():
+def test_command_count_is_23():
     cmds = cap.list_commands(include_dead=True)
-    assert len(cmds) == 20
+    # P2 后：原 20 + collect + batch market-report + batch match-report = 23
+    assert len(cmds) == 23
 
 
 def test_dead_commands_excluded_when_requested():
     active = cap.list_commands(include_dead=False)
-    assert len(active) == 19
+    # 23 总数含 1 个 dead_link(smart-send)，活跃 = 22
+    assert len(active) == 22
     assert all(c.status != "dead_link" for c in active)
 
 
@@ -64,7 +66,7 @@ def test_schema_generation_valid_json():
     parsed = json.loads(text)
     assert parsed["name"] == "lakejob"
     assert parsed["version"] == cap.SCHEMA_VERSION
-    assert len(parsed["commands"]) == 20
+    assert len(parsed["commands"]) == 23
     # 每个命令有 name + description
     assert all("name" in c and "description" in c for c in parsed["commands"])
 

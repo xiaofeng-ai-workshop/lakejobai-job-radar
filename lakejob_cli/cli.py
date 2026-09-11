@@ -408,5 +408,181 @@ def smart_send_cmd(keyword, city, greeting, yes, districts, company_size):
     output.emit(result)
 
 
+# ── 采集（CLI 脚本模式 → Web API，不自开浏览器） ──
+@main.command("collect")
+@click.argument("keywords")
+@click.option("--city", default="武汉", help="城市名，逗号分隔可多个")
+@click.option("--count", type=int, default=60, help="每个 城市×关键词 组合采集条数")
+@click.option("--no-details", is_flag=True, help="只采集岗位卡片(不含JD全文)，不补齐详情")
+def collect_cmd(keywords, city, count, no_details):
+    """采集岗位（CLI 脚本模式 → Web API，不自开浏览器）。搜索后自动补齐 JD 全文。"""
+    kws = [k.strip() for k in keywords.split(",") if k.strip()]
+    cities = [c.strip() for c in city.split(",") if c.strip()] or ["武汉"]
+    saved_total = 0
+    for c in cities:
+        for kw in kws:
+            resp = client.search(kw, c, count)
+            if resp.is_error:
+                output.emit(output.fail("collect", f"search {kw}@{c} 失败: HTTP {resp.status_code} {resp.text[:120]}"))
+                return
+            body = resp.json()
+            saved = body.get("saved", 0) if isinstance(body, dict) else 0
+            saved_total += saved
+            click.echo(f"  [搜索] {kw} @ {c}: 入库 {saved}", err=True)
+    if not no_details:
+        resp = client.fetch_details(mode="empty", limit=max(200, count * len(kws) * len(cities) * 4))
+        if resp.is_error:
+            output.emit(output.fail("collect", f"fetch-details 失败: HTTP {resp.status_code}"))
+            return
+        d = resp.json()
+        updated = d.get("updated", 0) if isinstance(d, dict) else 0
+        click.echo(f"  [补齐JD] {updated} 个岗位", err=True)
+    output.emit(output.ok("collect", data={"keywords": kws, "cities": cities, "saved_total": saved_total}))
+
+
+# ── 批量报告（CLI 脚本模式，读 SQLite，不操作浏览器） ──
+@main.group("batch")
+def batch_group():
+    """批量报告（读 SQLite 生成 md，不操作浏览器）。"""
+
+
+def _report_title_and_method(kws_used, cities_used, tech_only, search_kw_iso, only_new, new_since_minutes):
+    """复刻 match_report.main 的「文件名 + 采集方法章节」逻辑（已迁至此作为唯一来源）。"""
+    from datetime import date
+    from boss_state import get_setting
+    import json as _json
+
+    y, m, d = date.today().strftime("%Y-%m-%d").split("-")
+    suffix_parts = []
+    if tech_only:
+        suffix_parts.append("软件向")
+    if only_new:
+        suffix_parts.append(f"本次{int(new_since_minutes)}分钟")
+    suffix_str = "·" + "·".join(suffix_parts) if suffix_parts else ""
+    kw_part = search_kw_iso if search_kw_iso else "+".join(kws_used)[:30]
+    city_part = "+".join(cities_used)[:20] if cities_used else ""
+    report_title = f"{y}年{m}月{d}日-{kw_part}（{city_part}）{suffix_str}"
+
+    try:
+        history = _json.loads(get_setting("search_url_history") or "[]")
+    except Exception:
+        history = []
+    rel = [h for h in history if any(k in (h.get("kw", "") or "") for k in kws_used)]
+    other = [h for h in history if h not in rel]
+    search_urls = rel + other
+
+    method_lines = ["## 采集方法", ""]
+    if search_urls:
+        for su in search_urls:
+            method_lines.append(f"- 关键词「{su['kw']}」@ {su['city']}：[{su['url']}]({su['url']})")
+        method_lines.append("")
+        method_lines.append(
+            "> 搜索词直接交给 BOSS 直聘搜索引擎做相关性召回（非标题精确匹配），"
+            "结果会包含平台认为相关的岗位（如产品经理/售前/总经理类）；"
+            "报告已按相关性+黑名单双重过滤，被剔除岗位在各清单单列可复核。"
+            "链接需在已登录 BOSS 的浏览器中打开。"
+        )
+    else:
+        method_lines.append(f"- 数据采集于早期版本（未记录搜索URL），本次报告关键词：{'、'.join(kws_used)}")
+    method_lines.append("")
+    return report_title, method_lines
+
+
+@batch_group.command("market-report")
+@click.option("--keywords", default="", help="报告分析方向关键词(逗号分隔); 空则用全库")
+@click.option("--city", default="", help="城市(仅用于报告文件名)")
+@click.option("--limit", type=int, default=500)
+@click.option("--include-non-tech", is_flag=True, help="纳入非软件向岗位(默认只统计软件向)")
+@click.option("--only-new", is_flag=True, help="只看最近 --new-since-minutes 内入库的")
+@click.option("--new-since-minutes", type=int, default=60)
+@click.option("--search-kw", default=None, help="报告分析方向(单kw隔离); 默认取 --keywords 第一个; 'none'=不隔离")
+@click.option("--out", default=None, help="输出文件(默认 reports/ 下按命名规则)")
+def batch_market_report_cmd(keywords, city, limit, include_non_tech, only_new, new_since_minutes, search_kw, out):
+    """生成市场热词报告（无简历，仅统计 JD 热词；读 SQLite，不操作浏览器）。"""
+    from core.analyze import analyze_market, expand_search_kws, all_search_kws
+    from core.report import build_market_report
+    from pathlib import Path
+
+    kws_used = [k.strip() for k in (keywords or "").split(",") if k.strip()]
+    cities_used = [c.strip() for c in (city or "").split(",") if c.strip()]
+    tech_only = not include_non_tech
+    if search_kw is None:
+        search_kw_iso = kws_used[0] if kws_used else None
+    elif search_kw.lower() == "none":
+        search_kw_iso = None
+    else:
+        search_kw_iso = search_kw.strip()
+    search_kws_iso = expand_search_kws(search_kw_iso, all_search_kws()) if search_kw_iso else None
+    if search_kws_iso and len(search_kws_iso) > 1:
+        click.echo(f"[范围] 「{search_kw_iso}」为宽词, 纳入 {sorted(search_kws_iso)} 的岗位", err=True)
+
+    since = int(new_since_minutes) if only_new else None
+    jobs, weak_jobs, noise_jobs, dir_weak_jobs, non_tech_jobs, freq, cats = analyze_market(
+        limit, kws_used or None, tech_only=tech_only, since_minutes=since,
+        search_kws=search_kws_iso, direction=search_kw_iso,
+    )
+    report, today = build_market_report(jobs, weak_jobs, noise_jobs, dir_weak_jobs, non_tech_jobs, freq, cats)
+    report_title, method_lines = _report_title_and_method(
+        kws_used or ["全库"], cities_used, tech_only, search_kw_iso, only_new, new_since_minutes,
+    )
+    report = report.replace(f"# 市场热词报告 · {today}", f"# 市场热词报告 · {report_title}", 1)
+    report = report.replace("## 一、市场画像", "\n".join(method_lines) + "## 一、市场画像", 1)
+    summary = (
+        f"强相关{len(jobs)}个岗位(剔除弱相关{len(weak_jobs)}个、方向不符{len(dir_weak_jobs)}个、噪音{len(noise_jobs)}个"
+        + (f"、非软件{len(non_tech_jobs)}个" if non_tech_jobs else "")
+        + (f", 热词TOP1: {freq[0][0]}({freq[0][1]}个岗位)" if freq else "")
+    )
+    out_path = Path(out) if out else (Path(__file__).parent.parent / "reports" / f"{report_title}.md")
+    if not out:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(report, encoding="utf-8")
+    click.echo(f"[完成] 报告已生成: {out_path}\n        {summary}", err=True)
+    output.emit(output.ok("batch market-report", data={
+        "report": str(out_path), "summary": summary, "strong": len(jobs), "weak": len(weak_jobs),
+    }))
+
+
+@batch_group.command("match-report")
+@click.option("--limit", type=int, default=500)
+@click.option("--keyword-only", is_flag=True, help="不调LLM, 只做关键词分析(零成本)")
+@click.option("--include-non-tech", is_flag=True, help="纳入非软件向岗位(默认只统计软件向)")
+@click.option("--only-new", is_flag=True, help="只看最近 --new-since-minutes 内入库的")
+@click.option("--new-since-minutes", type=int, default=60)
+@click.option("--search-kw", default=None, help="报告分析方向(单kw隔离); 'none'=不隔离")
+@click.option("--out", default=None, help="输出文件(默认 reports/ 下按命名规则)")
+def batch_match_report_cmd(limit, keyword_only, include_non_tech, only_new, new_since_minutes, search_kw, out):
+    """生成简历-JD 匹配报告（读 SQLite + 可选 LLM；不操作浏览器）。"""
+    from core.analyze import analyze_match, expand_search_kws, all_search_kws
+    from core.report import build_report
+    from pathlib import Path
+
+    tech_only = not include_non_tech
+    if search_kw is None or search_kw.lower() == "none":
+        search_kw_iso = None
+    else:
+        search_kw_iso = search_kw.strip()
+    search_kws_iso = expand_search_kws(search_kw_iso, all_search_kws()) if search_kw_iso else None
+    since = int(new_since_minutes) if only_new else None
+    results, resume, mode, non_tech_jobs, dir_weak_jobs = analyze_match(
+        limit, keyword_only, tech_only=tech_only, since_minutes=since,
+        search_kws=search_kws_iso, direction=search_kw_iso,
+    )
+    if not results:
+        output.emit(output.fail("batch match-report", "没有可分析的结果（可能缺少简历或库为空）"))
+        return
+    report, today = build_report(results, resume, mode, non_tech_jobs, dir_weak_jobs)
+    kws_used = [search_kw_iso] if search_kw_iso else ["全库"]
+    report_title, method_lines = _report_title_and_method(
+        kws_used, [], tech_only, search_kw_iso, only_new, new_since_minutes,
+    )
+    report = report.replace(f"# 简历-JD 匹配报告 · {today}", f"# 简历-JD 匹配报告 · {report_title}", 1)
+    out_path = Path(out) if out else (Path(__file__).parent.parent / "reports" / f"{report_title}.md")
+    if not out:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(report, encoding="utf-8")
+    click.echo(f"[完成] 报告已生成: {out_path}", err=True)
+    output.emit(output.ok("batch match-report", data={"report": str(out_path), "count": len(results)}))
+
+
 if __name__ == "__main__":
     main()

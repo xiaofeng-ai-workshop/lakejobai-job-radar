@@ -54,6 +54,128 @@
       "status": "active"
     },
     {
+      "name": "collect",
+      "description": "采集岗位（CLI 脚本模式 → Web API，不自开浏览器）：搜索后自动补齐 JD 全文。",
+      "cli": "lakejob collect <keywords> --city <城市> [--count <数量>] [--no-details]",
+      "endpoint": "POST /api/jobs/search + POST /api/jobs/fetch-details",
+      "params": {
+        "keywords": {
+          "type": "string",
+          "required": true,
+          "description": "搜索关键词, 逗号分隔可多个"
+        },
+        "city": {
+          "type": "string",
+          "required": false,
+          "description": "城市名, 逗号分隔可多个, 默认武汉"
+        },
+        "count": {
+          "type": "integer",
+          "required": false,
+          "default": 60,
+          "description": "每个 城市×关键词 组合采集条数"
+        },
+        "no_details": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "只采卡片不补齐JD全文"
+        }
+      },
+      "capability_key": "collect",
+      "status": "active"
+    },
+    {
+      "name": "batch market-report",
+      "description": "生成市场热词报告（读 SQLite，不操作浏览器）。",
+      "cli": "lakejob batch market-report [--keywords <方向>] [--city <城市>] [--include-non-tech] [--only-new]",
+      "endpoint": "(读 SQLite via core.analyze/build_market_report, 无 HTTP)",
+      "params": {
+        "keywords": {
+          "type": "string",
+          "required": false,
+          "description": "报告分析方向关键词, 逗号分隔; 空则用全库"
+        },
+        "city": {
+          "type": "string",
+          "required": false,
+          "description": "城市(仅用于报告文件名)"
+        },
+        "limit": {
+          "type": "integer",
+          "required": false,
+          "default": 500
+        },
+        "include_non_tech": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "纳入非软件向岗位"
+        },
+        "only_new": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "只看最近 new-since-minutes 内入库的"
+        },
+        "new_since_minutes": {
+          "type": "integer",
+          "required": false,
+          "default": 60
+        },
+        "search_kw": {
+          "type": "string",
+          "required": false,
+          "description": "报告分析方向(单kw隔离); 'none'=不隔离"
+        }
+      },
+      "capability_key": "market_report",
+      "status": "active"
+    },
+    {
+      "name": "batch match-report",
+      "description": "生成简历-JD 匹配报告（读 SQLite + 可选 LLM，不操作浏览器）。",
+      "cli": "lakejob batch match-report [--limit 500] [--keyword-only] [--include-non-tech] [--search-kw <方向>]",
+      "endpoint": "(读 SQLite via core.analyze/build_report, 无 HTTP)",
+      "params": {
+        "limit": {
+          "type": "integer",
+          "required": false,
+          "default": 500
+        },
+        "keyword_only": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "不调LLM纯关键词分析"
+        },
+        "include_non_tech": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "纳入非软件向岗位"
+        },
+        "only_new": {
+          "type": "boolean",
+          "required": false,
+          "default": false,
+          "description": "只看最近 new-since-minutes 内入库的"
+        },
+        "new_since_minutes": {
+          "type": "integer",
+          "required": false,
+          "default": 60
+        },
+        "search_kw": {
+          "type": "string",
+          "required": false,
+          "description": "报告分析方向(单kw隔离); 'none'=不隔离"
+        }
+      },
+      "capability_key": "match_analyze",
+      "status": "active"
+    },
+    {
       "name": "status",
       "description": "查看浏览器状态和今日统计。",
       "cli": "lakejob status",

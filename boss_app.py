@@ -72,6 +72,7 @@ from boss_state import (
 )
 from boss_replier import generate_greeting
 from core.analyze import analyze_single_jd
+from core.scrape import browser_session, BrowserBusy, BrowserDailyLimit
 
 # ── FastAPI 应用 ──
 app = FastAPI(title="BOSS直聘自动化控制台", version="1.0.0")
@@ -94,13 +95,11 @@ automation: Optional[BossAutomation] = None
 monitor_task: Optional[asyncio.Task] = None
 ws_clients: List[WebSocket] = []
 monitor_paused: bool = False
-browser_sync_lock: Optional[asyncio.Lock] = None
 
 
 @app.on_event("startup")
 async def on_startup():
-    global automation, monitor_task, browser_sync_lock
-    browser_sync_lock = asyncio.Lock()
+    global automation, monitor_task
     # 清理旧垃圾会话 + 合并同名重复会话
     try:
         from boss_state import get_db
@@ -1040,6 +1039,17 @@ class AnalyzeRequest(BaseModel):
     with_company_info: Optional[bool] = False
 
 
+class FetchDetailsRequest(BaseModel):
+    """补齐岗位 JD 全文（迁移自废弃的 match_report.py 详情采集）。
+
+    - urls 非空 → 只采指定的岗位 URL 列表（mode 被忽略）
+    - urls 为空且 mode=empty（默认）→ 扫库里 description 为空的岗位补齐
+    """
+    urls: Optional[List[str]] = None
+    mode: Optional[str] = "empty"
+    limit: int = 200
+
+
 class OptimizeResumeRequest(BaseModel):
     job_url: str
     job_title: Optional[str] = ""
@@ -1288,7 +1298,13 @@ async def manual_heartbeat():
     """手动心跳保活。"""
     if not automation or automation.page is None:
         raise HTTPException(status_code=503, detail="浏览器未启动")
-    alive = await _run_pw(automation.heartbeat)
+    try:
+        async with browser_session("heartbeat"):
+            alive = await _run_pw(automation.heartbeat)
+    except BrowserBusy:
+        raise HTTPException(status_code=409, detail="浏览器正忙，请稍后重试")
+    except BrowserDailyLimit:
+        raise HTTPException(status_code=429, detail="今日浏览器操作已达上限")
     if not alive:
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
     return {"status": "ok", "alive": True}
@@ -1315,7 +1331,13 @@ async def navigate_to_chat_page():
     """在浏览器中打开 BOSS 直聘聊天页。"""
     if not automation or automation.page is None:
         raise HTTPException(status_code=503, detail="浏览器未启动")
-    success = await _run_pw(automation.navigate_to_chat)
+    try:
+        async with browser_session("navigate-chat"):
+            success = await _run_pw(automation.navigate_to_chat)
+    except BrowserBusy:
+        raise HTTPException(status_code=409, detail="浏览器正忙，请稍后重试")
+    except BrowserDailyLimit:
+        raise HTTPException(status_code=429, detail="今日浏览器操作已达上限")
     return {
         "status": "ok" if success else "error",
         "message": "已跳转到聊天页" if success else "跳转失败，请检查登录状态",
@@ -1459,17 +1481,22 @@ async def search_jobs(req: SearchRequest):
         stage_code = req.stage
 
         try:
-            jobs = await _run_pw(
-                automation.search,
-                req.keyword, city_code,
-                job_type=job_type_code,
-                salary=salary_code,
-                experience=req.experience,
-                edu=edu_code,
-                scale=req.scale,
-                stage=stage_code,
-                area_business=req.area_business or "",
-            )
+            async with browser_session("search"):
+                jobs = await _run_pw(
+                    automation.search,
+                    req.keyword, city_code,
+                    job_type=job_type_code,
+                    salary=salary_code,
+                    experience=req.experience,
+                    edu=edu_code,
+                    scale=req.scale,
+                    stage=stage_code,
+                    area_business=req.area_business or "",
+                )
+        except BrowserBusy:
+            raise HTTPException(status_code=409, detail="浏览器正忙，请稍后重试（其他操作进行中）")
+        except BrowserDailyLimit:
+            raise HTTPException(status_code=429, detail="今日浏览器操作已达上限")
         except HTTPException:
             raise
         except Exception as e:
@@ -1626,8 +1653,15 @@ async def apply_to_job(req: ApplyRequest):
         if smart:
             print(f"  🤖 智能招呼语已生成 ({len(greeting)}字): {greeting[:50]}...")
 
-    # 在后台线程运行（Playwright 是同步的）
-    result = await _run_pw(automation.apply_to_job, req.job_url, greeting)
+    try:
+        async with browser_session("apply"):
+            # 在后台线程运行（Playwright 是同步的）
+            result = await _run_pw(automation.apply_to_job, req.job_url, greeting)
+    except BrowserBusy:
+        raise HTTPException(status_code=409, detail="浏览器正忙，请稍后重试")
+    except BrowserDailyLimit:
+        raise HTTPException(status_code=429, detail="今日浏览器操作已达上限")
+
     if result.get("success"):
         await broadcast_ws(
             {
@@ -1648,7 +1682,14 @@ async def apply_batch(req: ApplyBatchRequest):
     remaining = daily_limit - get_today_application_count()
     urls = req.job_urls[: max(1, remaining)]
 
-    results = await _run_pw(automation.apply_batch, urls, req.greeting)
+    try:
+        async with browser_session("apply-batch"):
+            results = await _run_pw(automation.apply_batch, urls, req.greeting)
+    except BrowserBusy:
+        raise HTTPException(status_code=409, detail="浏览器正忙，请稍后重试")
+    except BrowserDailyLimit:
+        raise HTTPException(status_code=429, detail="今日浏览器操作已达上限")
+
     await broadcast_ws(
         {
             "type": "batch_complete",
@@ -1666,7 +1707,12 @@ async def scan_current_page():
         raise HTTPException(status_code=503, detail="浏览器未启动，请先到设置Tab点击「启动浏览器」")
 
     try:
-        jobs = await _run_pw(automation.scan_current_page)
+        async with browser_session("scan"):
+            jobs = await _run_pw(automation.scan_current_page)
+    except BrowserBusy:
+        raise HTTPException(status_code=409, detail="浏览器正忙，请稍后重试")
+    except BrowserDailyLimit:
+        raise HTTPException(status_code=429, detail="今日浏览器操作已达上限")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"扫描失败: {e}")
 
@@ -1727,13 +1773,19 @@ async def scan_and_apply(req: ScanAndApplyRequest = ScanAndApplyRequest()):
         raise HTTPException(status_code=429, detail="已达到今日投递上限")
 
     max_pages = max(1, min(int(req.max_pages or 5), 20))  # 1-20 页封顶
-    result = await _run_pw(
-        automation.scan_and_apply_all_pages,
-        max_pages=max_pages,
-        greeting=req.greeting,
-        dedup_company=req.dedup_company if req.dedup_company is not None else True,
-        filter_inactive_hr=req.filter_inactive_hr if req.filter_inactive_hr is not None else True,
-    )
+    try:
+        async with browser_session("scan-and-apply"):
+            result = await _run_pw(
+                automation.scan_and_apply_all_pages,
+                max_pages=max_pages,
+                greeting=req.greeting,
+                dedup_company=req.dedup_company if req.dedup_company is not None else True,
+                filter_inactive_hr=req.filter_inactive_hr if req.filter_inactive_hr is not None else True,
+            )
+    except BrowserBusy:
+        raise HTTPException(status_code=409, detail="浏览器正忙，请稍后重试")
+    except BrowserDailyLimit:
+        raise HTTPException(status_code=429, detail="今日浏览器操作已达上限")
     await broadcast_ws(
         {
             "type": "scan_apply_complete",
@@ -1755,6 +1807,70 @@ async def analyze_jd(req: AnalyzeRequest):
     """
     resume = get_setting("resume_summary", "")
     return analyze_single_jd(req.description or "", req.job_title or "", req.company or "", resume)
+
+
+@app.post("/api/jobs/fetch-details")
+async def fetch_job_details(req: FetchDetailsRequest):
+    """补齐岗位 JD 全文（迁移自废弃的 match_report.py 详情采集）。
+
+    全程占用浏览器锁（browser_session），与其他浏览器操作互斥；
+    每个 URL 经 automation.fetch_detail 打开详情页补 JD + HR 信息，内部已做拟人化停顿。
+    - urls 非空：只采指定 URL；
+    - 否则 mode=empty（默认）：扫库里 description 为空的岗位补齐（上限 limit）。
+    """
+    if not automation or automation.page is None:
+        raise HTTPException(status_code=503, detail="浏览器未启动，请先到设置Tab点击「启动浏览器」")
+
+    urls: List[str] = []
+    if req.urls:
+        urls = [u.strip() for u in req.urls if u and u.strip()]
+    elif (req.mode or "empty") == "empty":
+        # 取较多样本再过滤空 JD，避免 LIMIT 太小漏采
+        rows = list_applications(limit=(req.limit or 200) * 4 or 800)
+        urls = [
+            j["job_url"] for j in rows
+            if j.get("job_url") and not (j.get("description") or "").strip()
+        ][: req.limit or 200]
+    if not urls:
+        return {"fetched": 0, "updated": 0, "failed": [], "message": "无待补齐 JD 的岗位"}
+
+    updated = 0
+    failed: List[dict] = []
+    try:
+        async with browser_session("fetch-details"):
+            for url in urls:
+                try:
+                    d = await _run_pw(automation.fetch_detail, url)
+                    desc = (d.get("description") or "").strip()
+                    if desc:
+                        existing = get_application_by_url(url)
+                        if existing:
+                            update_application_from_job(
+                                existing["id"],
+                                {
+                                    "description": d.get("description", ""),
+                                    "hr_name": d.get("hr_name", ""),
+                                    "hr_title": d.get("hr_title", ""),
+                                    "hr_active_label": d.get("hr_active_label", ""),
+                                    "hr_active_days": d.get("hr_active_days", -1),
+                                },
+                            )
+                            updated += 1
+                except Exception as e:
+                    failed.append({"url": url, "error": str(e)[:200]})
+    except BrowserBusy:
+        raise HTTPException(status_code=409, detail="浏览器正忙，请稍后重试（其他操作进行中）")
+    except BrowserDailyLimit:
+        raise HTTPException(status_code=429, detail="今日浏览器操作已达上限")
+    return {
+        "fetched": len(urls),
+        "updated": updated,
+        "failed": failed,
+        "message": (
+            f"已补齐 {updated}/{len(urls)} 个岗位 JD"
+            + (f"，{len(failed)} 个失败" if failed else "")
+        ),
+    }
 
 
 @app.post("/api/jobs/optimize-resume")
@@ -2027,7 +2143,6 @@ def get_conversation_messages(conv_id: int, limit: int = 50):
 @app.post("/api/conversations/{conv_id}/sync")
 async def sync_conversation_messages(conv_id: int):
     """按需从当前 BOSS 浏览器会话同步一次消息。"""
-    global browser_sync_lock
     conv = get_conversation(conv_id)
     if not conv:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -2042,17 +2157,8 @@ async def sync_conversation_messages(conv_id: int):
     if not hr_name:
         raise HTTPException(status_code=400, detail="会话缺少HR姓名")
 
-    if browser_sync_lock is None:
-        browser_sync_lock = asyncio.Lock()
-    if browser_sync_lock.locked():
-        return {
-            "success": False,
-            "message": "浏览器正忙，先显示缓存",
-            "messages": _clean_messages_for_web(get_messages(conv_id, 100)),
-        }
-
     try:
-        async with browser_sync_lock:
+        async with browser_session("sync"):
             opened = await asyncio.wait_for(_run_pw(automation.open_conversation_by_name, hr_name), timeout=8)
             if not opened:
                 return {
@@ -2108,6 +2214,18 @@ async def sync_conversation_messages(conv_id: int):
                 is_system = last.get("sender") == "hr" and len(last_content) <= 80 and any(last_content.startswith(p) for p in _sys_prefixes)
                 if not is_system:
                     update_conversation_last_message(conv_id, last.get("content", ""), last.get("sender", "hr"))
+    except BrowserBusy:
+        return {
+            "success": False,
+            "message": "浏览器正忙，先显示缓存",
+            "messages": _clean_messages_for_web(get_messages(conv_id, 100)),
+        }
+    except BrowserDailyLimit:
+        return {
+            "success": False,
+            "message": "今日浏览器操作已达上限",
+            "messages": _clean_messages_for_web(get_messages(conv_id, 100)),
+        }
     except asyncio.TimeoutError:
         return {
             "success": False,
@@ -2132,12 +2250,17 @@ async def send_manual_message(conv_id: int, req: SendMessageRequest):
     if not hr_name:
         raise HTTPException(status_code=400, detail="会话缺少HR姓名")
 
-    # 先打开对应会话
-    opened = await _run_pw(automation.open_conversation_by_name, hr_name)
-    if not opened:
-        raise HTTPException(status_code=500, detail=f"无法在浏览器中打开 {hr_name} 的会话")
-
-    browser_ok = await _run_pw(automation.send_message, req.content, False)
+    try:
+        async with browser_session("send"):
+            # 先打开对应会话
+            opened = await _run_pw(automation.open_conversation_by_name, hr_name)
+            if not opened:
+                raise HTTPException(status_code=500, detail=f"无法在浏览器中打开 {hr_name} 的会话")
+            browser_ok = await _run_pw(automation.send_message, req.content, False)
+    except BrowserBusy:
+        raise HTTPException(status_code=409, detail="浏览器正忙，请稍后重试")
+    except BrowserDailyLimit:
+        raise HTTPException(status_code=429, detail="今日浏览器操作已达上限")
     if not browser_ok:
         raise HTTPException(status_code=500, detail="浏览器发送失败，本地不会写入这条消息")
 
@@ -2164,7 +2287,13 @@ async def open_conversation_in_browser(conv_id: int):
     hr_name = conv.get("hr_name", "")
     if not hr_name:
         raise HTTPException(status_code=400, detail="会话缺少HR姓名")
-    success = await _run_pw(automation.open_conversation_by_name, hr_name)
+    try:
+        async with browser_session("open-conversation"):
+            success = await _run_pw(automation.open_conversation_by_name, hr_name)
+    except BrowserBusy:
+        raise HTTPException(status_code=409, detail="浏览器正忙，请稍后重试")
+    except BrowserDailyLimit:
+        raise HTTPException(status_code=429, detail="今日浏览器操作已达上限")
     return {
         "success": success,
         "message": f"已在浏览器中打开 {hr_name} 的会话" if success else "打开失败",

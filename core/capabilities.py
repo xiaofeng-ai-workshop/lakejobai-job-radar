@@ -67,7 +67,7 @@ class Command:
     status: str = "active"       # active | dead_link
 
 
-# 真实 CLI 命令面（lakejob_cli/cli.py 的 click 命令），共 20 个。
+# 真实 CLI 命令面（lakejob_cli/cli.py 的 click 命令），共 23 个。
 # company-preview 在老 schema.json 里被误列为命令，但实际无对应 click 命令，
 # 故不在此列出（它是 smart-send 内部调用的端点）。smart-send 标 dead_link。
 COMMANDS: List[Command] = [
@@ -84,6 +84,47 @@ COMMANDS: List[Command] = [
             "count": {"type": "integer", "required": False, "default": 60, "description": "返回数量上限"},
         },
         capability_key="collect",
+    ),
+    Command(
+        "collect", "采集岗位（CLI 脚本模式 → Web API，不自开浏览器）：搜索后自动补齐 JD 全文。",
+        "lakejob collect <keywords> --city <城市> [--count <数量>] [--no-details]",
+        endpoint="POST /api/jobs/search + POST /api/jobs/fetch-details",
+        params={
+            "keywords": {"type": "string", "required": True, "description": "搜索关键词, 逗号分隔可多个"},
+            "city": {"type": "string", "required": False, "description": "城市名, 逗号分隔可多个, 默认武汉"},
+            "count": {"type": "integer", "required": False, "default": 60, "description": "每个 城市×关键词 组合采集条数"},
+            "no_details": {"type": "boolean", "required": False, "default": False, "description": "只采卡片不补齐JD全文"},
+        },
+        capability_key="collect",
+    ),
+    Command(
+        "batch market-report", "生成市场热词报告（读 SQLite，不操作浏览器）。",
+        "lakejob batch market-report [--keywords <方向>] [--city <城市>] [--include-non-tech] [--only-new]",
+        endpoint="(读 SQLite via core.analyze/build_market_report, 无 HTTP)",
+        params={
+            "keywords": {"type": "string", "required": False, "description": "报告分析方向关键词, 逗号分隔; 空则用全库"},
+            "city": {"type": "string", "required": False, "description": "城市(仅用于报告文件名)"},
+            "limit": {"type": "integer", "required": False, "default": 500},
+            "include_non_tech": {"type": "boolean", "required": False, "default": False, "description": "纳入非软件向岗位"},
+            "only_new": {"type": "boolean", "required": False, "default": False, "description": "只看最近 new-since-minutes 内入库的"},
+            "new_since_minutes": {"type": "integer", "required": False, "default": 60},
+            "search_kw": {"type": "string", "required": False, "description": "报告分析方向(单kw隔离); 'none'=不隔离"},
+        },
+        capability_key="market_report",
+    ),
+    Command(
+        "batch match-report", "生成简历-JD 匹配报告（读 SQLite + 可选 LLM，不操作浏览器）。",
+        "lakejob batch match-report [--limit 500] [--keyword-only] [--include-non-tech] [--search-kw <方向>]",
+        endpoint="(读 SQLite via core.analyze/build_report, 无 HTTP)",
+        params={
+            "limit": {"type": "integer", "required": False, "default": 500},
+            "keyword_only": {"type": "boolean", "required": False, "default": False, "description": "不调LLM纯关键词分析"},
+            "include_non_tech": {"type": "boolean", "required": False, "default": False, "description": "纳入非软件向岗位"},
+            "only_new": {"type": "boolean", "required": False, "default": False, "description": "只看最近 new-since-minutes 内入库的"},
+            "new_since_minutes": {"type": "integer", "required": False, "default": 60},
+            "search_kw": {"type": "string", "required": False, "description": "报告分析方向(单kw隔离); 'none'=不隔离"},
+        },
+        capability_key="match_analyze",
     ),
     Command("status", "查看浏览器状态和今日统计。", "lakejob status", endpoint="GET /api/status", capability_key="system"),
     Command("stats", "投递转化漏斗统计：搜索→待投递→已投递→HR回复→面试。", "lakejob stats",
